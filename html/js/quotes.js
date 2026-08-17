@@ -56,8 +56,8 @@ const quotesApp = {
   // ── 数据获取 ──────────────────────────────────
   /** 今日实时汇率 — fawazahmed0/currency-api */
   async _fetchToday() {
-    const url = 'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/cny.json';
-    const res = await fetch(url);
+    const url = `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/cny.json?ts=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`Today API ${res.status}`);
     const data = await res.json();
     const cny = data.cny;
@@ -78,7 +78,7 @@ const quotesApp = {
     const start = this._yearAgoStr();
     const symbols = this.ffCodes.join(',');
     const url = `https://api.frankfurter.dev/v1/${start}..${end}?base=CNY&symbols=${symbols}`;
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) throw new Error(`Frankfurter ${res.status}`);
     const data = await res.json();
     const rates = data.rates || {};
@@ -105,8 +105,8 @@ const quotesApp = {
     if (needCodes.length === 0) return {};
 
     // 1. 获取版本列表
-    const listUrl = 'https://data.jsdelivr.com/v1/packages/npm/@fawazahmed0/currency-api';
-    const listRes = await fetch(listUrl);
+    const listUrl = `https://data.jsdelivr.com/v1/packages/npm/@fawazahmed0/currency-api?ts=${Date.now()}`;
+    const listRes = await fetch(listUrl, { cache: 'no-store' });
     if (!listRes.ok) throw new Error(`Version list ${listRes.status}`);
     const listData = await listRes.json();
     const versions = listData.versions || [];
@@ -165,7 +165,7 @@ const quotesApp = {
   async _fetchVersionCny(version) {
     try {
       const url = `https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@${version}/v1/currencies/cny.json`;
-      const res = await fetch(url);
+      const res = await fetch(url, { cache: 'no-store' });
       if (!res.ok) return null;
       const data = await res.json();
       return data.cny || null;
