@@ -91,3 +91,8 @@ _build/
 RTE_Components.h
 EventRecorderStub.scvd
 JLinkLog.txt
+# EpdDesktop (.NET 8 WinForms) build output
+desktop/EpdDesktop/bin/
+desktop/EpdDesktop/obj/
+desktop/EpdDesktop/dist/
+desktop/EpdDesktop/*.user
