@@ -83,7 +83,8 @@ internal static class ScanProbe
         {
             var settings = Settings.Load();
             var data = await RatesFetcher.FetchAsync(settings);
-            settings.Cache = new RateCache { Date = data.Date, Rates = data.Today, History = data.History };
+            settings.Cache = new RateCache { Date = data.Date, FetchedAt = DateTime.Now, Rates = data.Today, History = data.History };
+            settings.LastFetchDate = DateTime.Today.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
             Settings.Save(settings);
             sb.AppendLine($"抓取成功: {data.Date}{(data.FromCache ? "（来自缓存）" : "")}");
             foreach (var code in RatesFetcher.Currencies)

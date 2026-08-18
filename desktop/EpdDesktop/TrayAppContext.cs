@@ -83,18 +83,29 @@ public sealed class TrayAppContext : ApplicationContext
     }
 
     // ── 调度 ──────────────────────────────────────
+    // 时间轴：推送时间 PushTime，汇率数据在 PushTime - 30 分钟自动抓取好，
+    // 推送时刻直接用备好的数据（不受推送瞬间网络影响）。
     private void OnPoll(object? state)
     {
         if (_pushing) return;
         if (!_settings.ScheduledPushEnabled) return;
         if (string.IsNullOrEmpty(_settings.DeviceAddress)) return;
+        if (!TimeOnly.TryParse(_settings.PushTime, out var pushTime)) return;
 
         var today = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-        if (_settings.LastPushDate == today) return;
-        if (TimeOnly.TryParse(_settings.PushTime, out var t) && DateTime.Now.TimeOfDay >= t.ToTimeSpan())
+        var now = DateTime.Now.TimeOfDay;
+
+        // 1. 推送点：到点且今天未推 → 推送（数据已由提前抓取备好，未备好则现场抓）
+        if (_settings.LastPushDate != today && now >= pushTime.ToTimeSpan())
         {
             Log.Info("定时推送触发");
             PushRatesAsync(manual: false);
+        }
+        // 2. 抓取点：推送前 30 分钟，今天尚未抓取 → 自动更新汇率数据
+        else if (_settings.LastFetchDate != today && now >= pushTime.AddMinutes(-30).ToTimeSpan())
+        {
+            Log.Info($"定时抓取触发（推送前 30 分钟，推送时间 {_settings.PushTime}）");
+            UpdateRatesAsync();
         }
         UpdateStatus();
     }
@@ -119,7 +130,26 @@ public sealed class TrayAppContext : ApplicationContext
             RatesData data;
             try
             {
-                data = await RatesFetcher.FetchAsync(_settings);
+                // 定时推送：今天已提前抓取（推送前 30 分钟）→ 直接用缓存数据渲染，
+                // 推送动作不依赖网络；手动推送：现场抓取最新。
+                if (!manual && _settings.LastFetchDate == DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                    && _settings.Cache is { Rates.Count: > 0 })
+                {
+                    data = new RatesData
+                    {
+                        Date = _settings.Cache.Date,
+                        FetchedAt = _settings.Cache.FetchedAt,
+                        Today = _settings.Cache.Rates,
+                        History = _settings.Cache.History,
+                        FromCache = true,
+                        CacheDate = _settings.Cache.Date,
+                    };
+                    RatesFetcher.ComputeChanges(data);
+                }
+                else
+                {
+                    data = await RatesFetcher.FetchAsync(_settings);
+                }
             }
             catch (RatesFetchException e)
             {
@@ -129,7 +159,8 @@ public sealed class TrayAppContext : ApplicationContext
             }
 
             // 无论是否来自缓存，保存最新缓存供离线兜底（含历史，保 YTD/MTD/折线）
-            _settings.Cache = new RateCache { Date = data.Date, Rates = data.Today, History = data.History };
+            _settings.Cache = new RateCache { Date = data.Date, FetchedAt = DateTime.Now, Rates = data.Today, History = data.History };
+            _settings.LastFetchDate = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             Settings.Save(_settings);
             if (data.FromCache)
                 ShowBalloon("汇率使用缓存", $"联网获取失败，使用 {data.Date} 的缓存数据推送", ToolTipIcon.Warning);
@@ -260,7 +291,8 @@ public sealed class TrayAppContext : ApplicationContext
         {
             progress?.Invoke("正在更新汇率数据…");
             var data = await RatesFetcher.FetchAsync(_settings, progress);
-            _settings.Cache = new RateCache { Date = data.Date, Rates = data.Today, History = data.History };
+            _settings.Cache = new RateCache { Date = data.Date, FetchedAt = DateTime.Now, Rates = data.Today, History = data.History };
+            _settings.LastFetchDate = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             Settings.Save(_settings);
             int ok = RatesFetcher.Currencies.Count(c => data.Today.ContainsKey(c));
             Log.Info($"汇率数据更新: {data.Date} {ok}/{RatesFetcher.Currencies.Length} 币种{(data.FromCache ? "（缓存）" : "")}");
@@ -295,7 +327,8 @@ public sealed class TrayAppContext : ApplicationContext
         var last = _lastPushTime?.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "从未";
         var result = _lastPushTime == null ? "" : _lastPushOk ? "成功" : "失败";
         var device = string.IsNullOrEmpty(_settings.DeviceName) ? "未配置设备" : _settings.DeviceName;
-        _tray.Text = $"EPD 墨水屏 · {device} · 上次推送 {last} {result}".Trim();
+        var pushInfo = _settings.ScheduledPushEnabled ? $" · 每日 {_settings.PushTime} 推送" : "";
+        _tray.Text = $"EPD 墨水屏 · {device} · 上次推送 {last} {result}{pushInfo}".Trim();
     }
 
     private void ShowBalloon(string title, string text, ToolTipIcon icon = ToolTipIcon.Info)

@@ -17,6 +17,7 @@ public record RatePoint(string Date, double RateInv);
 public class RatesData
 {
     public string Date { get; set; } = "";
+    public DateTime FetchedAt { get; set; } = DateTime.Now; // 抓取动作发生时间
     public Dictionary<string, double> Today { get; set; } = new();             // code -> 1外币 = X CNY
     public Dictionary<string, List<RatePoint>> History { get; set; } = new();  // code -> 历史点(rateInv)
     public Dictionary<string, double?> Ytd { get; set; } = new();              // code -> 今年波动 %
@@ -63,7 +64,13 @@ public static class RatesFetcher
             var cache = settings.Cache;
             if (cache is { Rates.Count: > 0 })
             {
-                var data = new RatesData { Date = cache.Date, FromCache = true, CacheDate = cache.Date };
+                var data = new RatesData
+                {
+                    Date = cache.Date,
+                    FetchedAt = cache.FetchedAt == default ? DateTime.Now : cache.FetchedAt,
+                    FromCache = true,
+                    CacheDate = cache.Date,
+                };
                 foreach (var (k, v) in cache.Rates) data.Today[k] = v;
                 foreach (var (k, v) in cache.History) data.History[k] = v;
                 ComputeChanges(data); // 缓存含历史 → YTD/MTD/折线完整
@@ -290,7 +297,10 @@ public static class RatesFetcher
             var mtdStr = mtd.HasValue ? $"{Arrow(mtd.Value)}{Math.Abs(mtd.Value).ToString("F2", CultureInfo.InvariantCulture)}%" : "—";
             sb.AppendLine($"  {code}: 汇率 {rateStr}  今年{ytdStr}  本月{mtdStr}  折线{pts}点");
         }
-        return $"更新完成: {data.Date}{(data.FromCache ? "（缓存）" : "（在线）")}\n{ok}/{Currencies.Length} 币种更新成功\n" + sb.ToString().TrimEnd();
+        // 数据源每日发布前一交易日汇率（与 Web 版一致），抓取时间与数据日期分开标注
+        var fetched = data.FetchedAt == default ? "" : $" · 抓取于 {data.FetchedAt:MM-dd HH:mm}";
+        return $"数据日期 {data.Date}{(data.FromCache ? "（缓存）" : "（在线）")}{fetched}\n" +
+               $"{ok}/{Currencies.Length} 币种更新成功\n" + sb.ToString().TrimEnd();
     }
 
     private static string Arrow(double v) => v >= 0 ? "↑" : "↓";

@@ -43,27 +43,34 @@ public sealed class SettingsForm : Form
 
         Text = "设置 — EPD 墨水屏助手";
         Width = 460;
-        Height = 580;
+        Height = 598;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         // ── 推送 ──
-        var pushGroup = new GroupBox { Text = "推送", Width = 420, Height = 100, Left = 14, Top = 12 };
+        var pushGroup = new GroupBox { Text = "推送", Width = 420, Height = 118, Left = 14, Top = 12 };
         _pushTime.Left = 90; _pushTime.Top = 26; _pushTime.Width = 90;
         var timeLabel = new Label { Text = "推送时间:", Left = 14, Top = 29, AutoSize = true };
         _scheduled.Left = 200; _scheduled.Top = 28; _scheduled.Checked = _settings.ScheduledPushEnabled;
         _testPush.Left = 90; _testPush.Top = 60;
         _updateRates.Left = 205; _updateRates.Top = 60;
+        var pushHint = new Label
+        {
+            Text = "每日汇率数据将在推送前 30 分钟自动更新，推送时刻直接用备好的数据。",
+            Left = 14, Top = 94, AutoSize = true,
+            ForeColor = SystemColors.GrayText,
+        };
         pushGroup.Controls.Add(timeLabel);
         pushGroup.Controls.Add(_pushTime);
         pushGroup.Controls.Add(_scheduled);
         pushGroup.Controls.Add(_testPush);
         pushGroup.Controls.Add(_updateRates);
+        pushGroup.Controls.Add(pushHint);
 
         // ── 显示 ──
-        var dispGroup = new GroupBox { Text = "显示", Width = 420, Height = 96, Left = 14, Top = 122 };
+        var dispGroup = new GroupBox { Text = "显示", Width = 420, Height = 96, Left = 14, Top = 140 };
         var sizeLabel = new Label { Text = "面板尺寸:", Left = 14, Top = 29, AutoSize = true };
         _panelSize.Left = 90; _panelSize.Top = 25;
         foreach (var (label, w, h) in PanelPresets)
@@ -84,7 +91,7 @@ public sealed class SettingsForm : Form
         dispGroup.Controls.Add(tipLabel);
 
         // ── 设备与自启 ──
-        var devGroup = new GroupBox { Text = "设备", Width = 420, Height = 96, Left = 14, Top = 228 };
+        var devGroup = new GroupBox { Text = "设备", Width = 420, Height = 96, Left = 14, Top = 246 };
         _deviceLabel.Text = string.IsNullOrEmpty(_settings.DeviceName)
             ? "未配置（首次使用请选择设备）"
             : $"{_settings.DeviceName}（{_settings.DeviceAddress}）";
@@ -96,14 +103,14 @@ public sealed class SettingsForm : Form
         devGroup.Controls.Add(_autoStart);
 
         // ── 汇率数据状态 ──
-        var statusGroup = new GroupBox { Text = "汇率数据状态", Width = 420, Height = 168, Left = 14, Top = 334 };
+        var statusGroup = new GroupBox { Text = "汇率数据状态", Width = 420, Height = 168, Left = 14, Top = 352 };
         statusGroup.Controls.Add(_rateStatus);
         _rateStatus.Dock = DockStyle.Fill;
         _rateStatus.Text = BuildCacheStatus();
 
         // ── 按钮 ──
-        _okButton.Left = 250; _okButton.Top = 512;
-        _cancelButton.Left = 340; _cancelButton.Top = 512;
+        _okButton.Left = 250; _okButton.Top = 530;
+        _cancelButton.Left = 340; _cancelButton.Top = 530;
 
         Controls.Add(pushGroup);
         Controls.Add(dispGroup);

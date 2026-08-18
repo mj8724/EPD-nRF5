@@ -6,6 +6,7 @@ namespace EpdDesktop;
 public class RateCache
 {
     public string Date { get; set; } = "";
+    public DateTime FetchedAt { get; set; }         // 抓取动作发生时间
     public Dictionary<string, double> Rates { get; set; } = new();
     public Dictionary<string, List<RatePoint>> History { get; set; } = new();
 }
@@ -22,6 +23,7 @@ public class AppSettings
     public bool AutoStart { get; set; } = true;     // 默认开（用户要求开机自启）
     public bool ScheduledPushEnabled { get; set; } = true;
     public string? LastPushDate { get; set; }       // "yyyy-MM-dd"，仅成功推送时更新
+    public string? LastFetchDate { get; set; }      // "yyyy-MM-dd"，每日自动抓取成功时更新（推送前 30 分钟）
     public RateCache? Cache { get; set; }           // 最近一次成功抓取的汇率
 }
 
