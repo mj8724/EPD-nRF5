@@ -33,6 +33,7 @@ public class AppSettings
     public int TokenUpdateHours { get; set; } = 4;                  // 更新间隔（小时）；Sanitize 钳制 1..24
     public string TokenQuietStart { get; set; } = "22:00";          // 免打扰开始 HH:mm
     public string TokenQuietEnd { get; set; } = "08:00";            // 免打扰结束 HH:mm
+    public string DisplayMode { get; set; } = "rates";              // rates/calendar/clock/token：当前显示模式（设备状态跟踪，跨重启）
     public TokenUsage? TokenUsage { get; set; }                     // 上次采集结果 + 增量累计
 }
 
@@ -106,6 +107,7 @@ public static class Settings
         if (!TimeOnly.TryParse(s.TokenQuietStart, out _)) s.TokenQuietStart = "22:00";
         if (!TimeOnly.TryParse(s.TokenQuietEnd, out _)) s.TokenQuietEnd = "08:00";
         if (string.IsNullOrWhiteSpace(s.TokenApiBase)) s.TokenApiBase = "https://newapi.liubaitech.cn";
+        if (s.DisplayMode is not ("rates" or "calendar" or "clock" or "token")) s.DisplayMode = "rates";
         return s;
     }
 }

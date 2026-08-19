@@ -36,13 +36,19 @@ public sealed class TrayAppContext : ApplicationContext
         if (_settings.AutoStart != Autostart.IsEnabled())
             Autostart.Set(_settings.AutoStart);
 
-        _modeRates = new ToolStripMenuItem("汇率图", null, (_, _) => PushRatesAsync(manual: true)) { CheckOnClick = true };
-        _modeCalendar = new ToolStripMenuItem("日历", null, (_, _) => SwitchModeAsync(1, "日历")) { CheckOnClick = true };
-        _modeClock = new ToolStripMenuItem("时钟", null, (_, _) => SwitchModeAsync(2, "时钟")) { CheckOnClick = true };
-        _modeToken = new ToolStripMenuItem("Token 用量", null, (_, _) => SwitchToTokenAsync()) { CheckOnClick = true };
-        _modeRates.Checked = true;
-        foreach (var item in new[] { _modeRates, _modeCalendar, _modeClock, _modeToken })
-            item.CheckedChanged += (_, _) => SyncModeChecks();
+        _modeRates = new ToolStripMenuItem("汇率图", null, (_, _) => PushRatesAsync(manual: true));
+        _modeCalendar = new ToolStripMenuItem("日历", null, (_, _) => SwitchModeAsync(1, "日历"));
+        _modeClock = new ToolStripMenuItem("时钟", null, (_, _) => SwitchModeAsync(2, "时钟"));
+        _modeToken = new ToolStripMenuItem("Token 用量", null, (_, _) => SwitchToTokenAsync());
+        // 启动时按上次记录的显示模式初始化勾选（CheckOnClick 已移除：勾选只由 SetDisplayMode 在推送/切换成功后设置）
+        var initialMode = _settings.DisplayMode switch
+        {
+            "token" => _modeToken,
+            "calendar" => _modeCalendar,
+            "clock" => _modeClock,
+            _ => _modeRates,
+        };
+        initialMode.Checked = true;
 
         _modeMenu = new ToolStripMenuItem("显示模式", null, _modeRates, _modeCalendar, _modeClock, _modeToken);
         _autoStartItem = new ToolStripMenuItem("开机自启", null, (sender, _) =>
@@ -169,8 +175,8 @@ public sealed class TrayAppContext : ApplicationContext
                 ShowBalloon("Token 已更新",
                     $"今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · " +
                     $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
-            // 当前显示的是 Token 面板 → 数据更新后自动重推
-            if (_modeToken.Checked) await PushTokenPanelAsync(manualBalloon: false);
+            // 当前显示的是 Token 面板 → 数据更新后自动重推（以持久化模式为准，跨重启保持）
+            if (_settings.DisplayMode == "token") await PushTokenPanelAsync(manualBalloon: false);
         }
         else if (manual || usage == null || usage.FetchedAt == default
                  || (DateTime.Now - usage.FetchedAt).TotalHours > 24)
@@ -268,7 +274,7 @@ public sealed class TrayAppContext : ApplicationContext
             var result = await EpdPusher.PushTokenAsync(addr, usage, _settings);
             _lastPushOk = true;
             _lastPushTime = DateTime.Now;
-            SetModeChecked(_modeToken); // 设备当前显示 Token 面板
+            SetDisplayMode(_modeToken, "token"); // 设备当前显示 Token 面板
             Log.Info($"Token 面板推送成功: 今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · " +
                      $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)} " +
                      $"({result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} model=0x{result.ModelId:X2})");
@@ -301,13 +307,23 @@ public sealed class TrayAppContext : ApplicationContext
                                   $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}";
     }
 
-    /// <summary>跨线程安全地把显示模式勾选切到指定项（推送可能在 timer 线程/线程池 continuation 完成）。</summary>
-    private void SetModeChecked(ToolStripMenuItem item)
+    /// <summary>显示模式切换成功：勾选唯一项、记录到设置并落盘（跨线程安全，推送可能在 timer/线程池 continuation 完成）。
+    /// 自动重推等逻辑以 _settings.DisplayMode 为准，不依赖易失的菜单勾选。</summary>
+    private void SetDisplayMode(ToolStripMenuItem item, string name)
     {
+        _settings.DisplayMode = name;
+        Settings.Save(_settings);
         if (_uiContext != null && _uiContext != SynchronizationContext.Current)
-            _uiContext.Post(_ => item.Checked = true, null);
+            _uiContext.Post(_ =>
+            {
+                foreach (var m in new[] { _modeRates, _modeCalendar, _modeClock, _modeToken })
+                    m.Checked = m == item;
+            }, null);
         else
-            item.Checked = true;
+        {
+            foreach (var m in new[] { _modeRates, _modeCalendar, _modeClock, _modeToken })
+                m.Checked = m == item;
+        }
     }
 
     /// <summary>免打扰判定：start &lt;= end → 区间内；跨午夜 → 分两段。解析失败返回 false（不豁免）。</summary>
@@ -397,7 +413,7 @@ public sealed class TrayAppContext : ApplicationContext
                     Settings.Save(_settings);
                     _lastPushOk = true;
                     _lastPushTime = DateTime.Now;
-                    SetModeChecked(_modeRates); // 设备当前显示汇率图
+                    SetDisplayMode(_modeRates, "rates"); // 设备当前显示汇率图
                     Log.Info($"推送成功: {_settings.DeviceName} ({data.Date}{(data.FromCache ? ", 缓存" : "")}) " +
                              $"model=0x{result.ModelId:X2} {result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} MTU={result.Mtu} RLE={result.Rle}");
                     ShowBalloon("推送成功", $"汇率已推送至 {_settings.DeviceName ?? "墨水屏"}（{data.Date}）");
@@ -459,6 +475,7 @@ public sealed class TrayAppContext : ApplicationContext
                     $"固件版本过旧（0x{ver:X2}），需要 v1.6（0x16）以上，请先升级固件");
             await ble.SetTimeAsync(mode);
             Log.Info($"切换显示模式: {modeName} ({_settings.DeviceName})");
+            SetDisplayMode(mode == 2 ? _modeClock : _modeCalendar, mode == 2 ? "clock" : "calendar");
             ShowBalloon($"已切换至{modeName}", "墨水屏正在刷新（约 20 秒），请勿断电");
             // 与推送同理：SET_TIME 触发立即重绘，写响应先于刷新完成返回；
             // 立即断开会触发固件 sleep 中断刷新 → 保持连接覆盖完整刷新时间。
@@ -473,20 +490,6 @@ public sealed class TrayAppContext : ApplicationContext
         {
             _pushing = false;
             UpdateStatus();
-        }
-    }
-
-    private void SyncModeChecks()
-    {
-        // 单选语义：只有一个勾选
-        var items = new[] { _modeRates, _modeCalendar, _modeClock, _modeToken };
-        if (items.Count(i => i.Checked) > 1)
-        {
-            // 保留最后点击的（CheckedChanged 已置位），取消其它
-            foreach (var item in items.Where(i => i.Checked).Skip(1))
-            {
-                item.Checked = false;
-            }
         }
     }
 
