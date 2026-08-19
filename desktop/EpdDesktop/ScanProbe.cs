@@ -128,6 +128,12 @@ internal static class ScanProbe
             sb.AppendLine($"今日 token: {TokenUsageFetcher.FmtTokens(usage.DayTokens)}");
             sb.AppendLine($"本月 token: {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}" +
                           $"（{(usage.Partial ? "部分，有页面失败" : "完整")}）");
+            sb.AppendLine(usage.YearBaselineComplete
+                ? $"今年 token: {TokenUsageFetcher.FmtTokens(usage.YearTokens)}"
+                : "今年 token: 统计中（基准未完成，托盘会自动后台统计）");
+            sb.AppendLine(usage.SiteBaselineComplete
+                ? $"全站 token: {TokenUsageFetcher.FmtTokens(usage.SiteTokens)}"
+                : "全站 token: 统计中（基准未完成，托盘会自动后台统计）");
             sb.AppendLine(usage.LastLogAt == 0
                 ? "最近请求: —"
                 : $"最近请求: {DateTimeOffset.FromUnixTimeSeconds(usage.LastLogAt).ToLocalTime():MM-dd HH:mm}");

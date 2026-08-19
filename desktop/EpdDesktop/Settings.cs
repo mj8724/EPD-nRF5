@@ -46,6 +46,12 @@ public class TokenUsage
     public long DayTokens { get; set; }           // 今日累计 token（created_at >= 本地今日 0 点）
     public long DayQuota { get; set; }            // 今日消耗 quota（stat 今日窗口）
     public string DayReset { get; set; } = "";    // "yyyy-MM-dd"；fetcher 检测跨日重置
+    public long YearTokens { get; set; }          // 今年累计 token（created_at >= 本地今年 1 月 1 日）
+    public string YearReset { get; set; } = "";   // "yyyy"；fetcher 检测跨年重置
+    public bool YearBaselineComplete { get; set; } // 今年基准是否建完（首次后台扫描）
+    public long SiteTokens { get; set; }          // 全站累计 token（admin /api/log，全用户）
+    public long SiteLastLogAt { get; set; }       // 全站增量游标
+    public bool SiteBaselineComplete { get; set; } // 全站基准是否建完
     public long BalanceQuota { get; set; }        // 账户余额 quota（user/self）
     public long LastLogAt { get; set; }           // 已统计到的最新一条日志 unix 秒（增量游标）
     public DateTime FetchedAt { get; set; }       // 上次成功更新

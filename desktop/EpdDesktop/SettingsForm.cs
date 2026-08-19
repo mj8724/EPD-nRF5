@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace EpdDesktop;
 
 /// <summary>设置窗体：推送时间、面板尺寸、三色屏、定时推送、开机自启、设备选择、立即测试推送。</summary>
@@ -41,6 +43,14 @@ public sealed class SettingsForm : Form
         Font = new Font("Consolas", 9f),
         Padding = new Padding(6),
     };
+    private readonly Label _usageStatus = new()
+    {
+        AutoSize = false,
+        Dock = DockStyle.Fill,
+        Font = new Font("Consolas", 9f),
+        Padding = new Padding(6),
+    };
+    private readonly System.Windows.Forms.Timer _usageTimer = new() { Interval = 1000 };
     private readonly Button _okButton = new() { Text = "确定", DialogResult = DialogResult.OK };
     private readonly Button _cancelButton = new() { Text = "取消", DialogResult = DialogResult.Cancel };
 
@@ -55,14 +65,17 @@ public sealed class SettingsForm : Form
 
         Text = "设置 — EPD 墨水屏助手";
         Width = 460;
-        Height = 760;
+        Height = 500;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
-        // ── 推送 ──
-        var pushGroup = new GroupBox { Text = "推送", Width = 420, Height = 118, Left = 14, Top = 12 };
+        // ── 标签页容器 ──
+        var tabs = new TabControl { Left = 14, Top = 12, Width = 420, Height = 410 };
+
+        // ── Tab「汇率」：推送 + 汇率数据状态 ──
+        var pushGroup = new GroupBox { Text = "推送", Width = 396, Height = 118, Left = 6, Top = 6 };
         _pushTime.Left = 90; _pushTime.Top = 26; _pushTime.Width = 90;
         var timeLabel = new Label { Text = "推送时间:", Left = 14, Top = 29, AutoSize = true };
         _scheduled.Left = 200; _scheduled.Top = 28; _scheduled.Checked = _settings.ScheduledPushEnabled;
@@ -81,8 +94,17 @@ public sealed class SettingsForm : Form
         pushGroup.Controls.Add(_updateRates);
         pushGroup.Controls.Add(pushHint);
 
-        // ── 显示 ──
-        var dispGroup = new GroupBox { Text = "显示", Width = 420, Height = 96, Left = 14, Top = 140 };
+        var statusGroup = new GroupBox { Text = "汇率数据状态", Width = 396, Height = 240, Left = 6, Top = 132 };
+        statusGroup.Controls.Add(_rateStatus);
+        _rateStatus.Dock = DockStyle.Fill;
+        _rateStatus.Text = BuildCacheStatus();
+
+        var tabRates = new TabPage("汇率");
+        tabRates.Controls.Add(pushGroup);
+        tabRates.Controls.Add(statusGroup);
+
+        // ── Tab「显示」──
+        var dispGroup = new GroupBox { Text = "显示", Width = 396, Height = 96, Left = 6, Top = 6 };
         var sizeLabel = new Label { Text = "面板尺寸:", Left = 14, Top = 29, AutoSize = true };
         _panelSize.Left = 90; _panelSize.Top = 25;
         foreach (var (label, w, h) in PanelPresets)
@@ -102,8 +124,11 @@ public sealed class SettingsForm : Form
         dispGroup.Controls.Add(_threeColor);
         dispGroup.Controls.Add(tipLabel);
 
-        // ── 设备与自启 ──
-        var devGroup = new GroupBox { Text = "设备", Width = 420, Height = 96, Left = 14, Top = 246 };
+        var tabDisp = new TabPage("显示");
+        tabDisp.Controls.Add(dispGroup);
+
+        // ── Tab「设备」──
+        var devGroup = new GroupBox { Text = "设备", Width = 396, Height = 96, Left = 6, Top = 6 };
         _deviceLabel.Text = string.IsNullOrEmpty(_settings.DeviceName)
             ? "未配置（首次使用请选择设备）"
             : $"{_settings.DeviceName}（{_settings.DeviceAddress}）";
@@ -114,8 +139,11 @@ public sealed class SettingsForm : Form
         devGroup.Controls.Add(_pickDevice);
         devGroup.Controls.Add(_autoStart);
 
-        // ── Token 用量（newapi 中转站） ──
-        var tokenGroup = new GroupBox { Text = "Token 用量（newapi.liubaitech.cn）", Width = 420, Height = 148, Left = 14, Top = 352 };
+        var tabDev = new TabPage("设备");
+        tabDev.Controls.Add(devGroup);
+
+        // ── Tab「Token 管理」：配置 + 用量概览 ──
+        var tokenGroup = new GroupBox { Text = "Token 用量（newapi.liubaitech.cn）", Width = 396, Height = 148, Left = 6, Top = 6 };
         _tokenEnabled.Left = 14; _tokenEnabled.Top = 18; _tokenEnabled.Checked = _settings.TokenEnabled;
         var apiLabel = new Label { Text = "API 地址:", Left = 14, Top = 42, AutoSize = true };
         _tokenApiBase.Left = 90; _tokenApiBase.Top = 39; _tokenApiBase.Text = _settings.TokenApiBase;
@@ -154,23 +182,31 @@ public sealed class SettingsForm : Form
         tokenGroup.Controls.Add(tokenHint);
         tokenGroup.Controls.Add(_tokenTest);
 
-        // ── 汇率数据状态 ──
-        var statusGroup = new GroupBox { Text = "汇率数据状态", Width = 420, Height = 168, Left = 14, Top = 512 };
-        statusGroup.Controls.Add(_rateStatus);
-        _rateStatus.Dock = DockStyle.Fill;
-        _rateStatus.Text = BuildCacheStatus();
+        var usageGroup = new GroupBox { Text = "用量概览", Width = 396, Height = 205, Left = 6, Top = 162 };
+        _usageStatus.Dock = DockStyle.Fill;
+        usageGroup.Controls.Add(_usageStatus);
+
+        var tabToken = new TabPage("Token 管理");
+        tabToken.Controls.Add(tokenGroup);
+        tabToken.Controls.Add(usageGroup);
+
+        tabs.TabPages.Add(tabRates);
+        tabs.TabPages.Add(tabDisp);
+        tabs.TabPages.Add(tabDev);
+        tabs.TabPages.Add(tabToken);
 
         // ── 按钮 ──
-        _okButton.Left = 250; _okButton.Top = 690;
-        _cancelButton.Left = 340; _cancelButton.Top = 690;
+        _okButton.Left = 250; _okButton.Top = 436;
+        _cancelButton.Left = 340; _cancelButton.Top = 436;
 
-        Controls.Add(pushGroup);
-        Controls.Add(dispGroup);
-        Controls.Add(devGroup);
-        Controls.Add(tokenGroup);
-        Controls.Add(statusGroup);
+        Controls.Add(tabs);
         Controls.Add(_okButton);
         Controls.Add(_cancelButton);
+
+        _usageTimer.Tick += (_, _) => RefreshUsageOverview();
+        _usageTimer.Start();
+        FormClosed += (_, _) => _usageTimer.Dispose();
+        RefreshUsageOverview();
 
         // 初始值
         if (TimeOnly.TryParse(_settings.PushTime, out var t))
@@ -221,6 +257,39 @@ public sealed class SettingsForm : Form
         var data = new RatesData { Date = cache.Date, Today = cache.Rates, History = cache.History };
         RatesFetcher.ComputeChanges(data);
         return RatesFetcher.FormatStatus(data);
+    }
+
+    /// <summary>跨线程安全地刷新用量概览（1s 定时器，显示基准进度与实时值）。</summary>
+    private void RefreshUsageOverview()
+    {
+        if (IsDisposed) return;
+        var u = _settings.TokenUsage;
+        var sb = new StringBuilder();
+        if (u == null || u.FetchedAt == default)
+        {
+            sb.AppendLine("今日使用: —");
+            sb.AppendLine("本月使用: —");
+            sb.AppendLine("今年使用: —（后台基准未开始）");
+            sb.AppendLine("全站使用: —（后台基准未开始）");
+            sb.AppendLine("最近请求: —");
+            sb.AppendLine("上次更新: 从未");
+        }
+        else
+        {
+            sb.AppendLine($"今日使用: {TokenUsageFetcher.FmtTokens(u.DayTokens)} token");
+            sb.AppendLine($"本月使用: {TokenUsageFetcher.FmtTokens(u.MonthTokens)} token");
+            sb.AppendLine(u.YearBaselineComplete
+                ? $"今年使用: {TokenUsageFetcher.FmtTokens(u.YearTokens)} token"
+                : $"今年使用: 统计中（{u.Pages} 页）…");
+            sb.AppendLine(u.SiteBaselineComplete
+                ? $"全站使用: {TokenUsageFetcher.FmtTokens(u.SiteTokens)} token"
+                : $"全站使用: 统计中（{u.Pages} 页）…");
+            sb.AppendLine(u.LastLogAt == 0
+                ? "最近请求: —"
+                : $"最近请求: {DateTimeOffset.FromUnixTimeSeconds(u.LastLogAt).ToLocalTime():MM-dd HH:mm}");
+            sb.AppendLine($"上次更新: {(u.FetchedAt == default ? "从未" : u.FetchedAt.ToString("MM-dd HH:mm"))}");
+        }
+        _usageStatus.Text = sb.ToString();
     }
 
     private void ApplyToSettings()

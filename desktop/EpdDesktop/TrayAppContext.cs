@@ -139,6 +139,17 @@ public sealed class TrayAppContext : ApplicationContext
     {
         if (!_settings.TokenEnabled || string.IsNullOrEmpty(_settings.TokenAccessToken)) return;
         var usage = _settings.TokenUsage;
+        // 基准未完成（本月/今年/全站任一）→ 先跑基准：长任务本身覆盖到 now，等价于一次全量更新
+        if (usage == null || !usage.BaselineComplete || !usage.YearBaselineComplete || !usage.SiteBaselineComplete)
+        {
+            if (InQuietHours(_settings.TokenQuietStart, _settings.TokenQuietEnd, DateTime.Now.TimeOfDay)) return;
+            if (_lastTokenFailAt is { } bf && (DateTime.Now - bf).TotalMinutes < 15) return;
+            if (_uiContext != null && _uiContext != SynchronizationContext.Current)
+                _uiContext.Post(_ => RunTokenBaselinesAsync(), null);
+            else
+                RunTokenBaselinesAsync();
+            return;
+        }
         bool due = usage == null || usage.FetchedAt == default
                    || (DateTime.Now - usage.FetchedAt).TotalHours >= _settings.TokenUpdateHours;
         if (!due) return;
@@ -150,6 +161,63 @@ public sealed class TrayAppContext : ApplicationContext
             _uiContext.Post(_ => FetchTokenUsageAsync(manual: false), null);
         else
             FetchTokenUsageAsync(manual: false);
+    }
+
+    /// <summary>后台基准：今年（覆盖本月）→ 全站，依次扫完；每批落盘（崩溃/重启后可从游标续跑）。</summary>
+    private async void RunTokenBaselinesAsync()
+    {
+        if (_tokenBusy) return;
+        if (string.IsNullOrEmpty(_settings.TokenAccessToken)) return;
+        _tokenBusy = true;
+        UpdateTokenMenuItem();
+        try
+        {
+            var usage = _settings.TokenUsage ?? new TokenUsage();
+            _settings.TokenUsage = usage;
+            if (!usage.YearBaselineComplete)
+            {
+                Log.Info("Token 基准: 开始统计今年用量…");
+                await TokenUsageFetcher.BuildYearBaselineAsync(usage, _settings.TokenApiBase, _settings.TokenAccessToken,
+                    progress: m => { Log.Info($"Token 更新: {m}"); Settings.Save(_settings); });
+                Settings.Save(_settings);
+                Log.Info($"Token 今年基准完成: {TokenUsageFetcher.FmtTokens(usage.YearTokens)}");
+            }
+            if (!usage.BaselineComplete) // 跨月后今年已建完时，仅补本月基准（年基准已覆盖时不触发）
+            {
+                Log.Info("Token 基准: 开始统计本月用量…");
+                await TokenUsageFetcher.BuildMonthBaselineAsync(usage, _settings.TokenApiBase, _settings.TokenAccessToken,
+                    progress: m => { Log.Info($"Token 更新: {m}"); Settings.Save(_settings); });
+                Settings.Save(_settings);
+                Log.Info($"Token 本月基准完成: {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
+            }
+            if (!usage.SiteBaselineComplete)
+            {
+                Log.Info("Token 基准: 开始统计全站用量…");
+                await TokenUsageFetcher.BuildSiteBaselineAsync(usage, _settings.TokenApiBase, _settings.TokenAccessToken,
+                    progress: m => { Log.Info($"Token 更新: {m}"); Settings.Save(_settings); });
+                Settings.Save(_settings);
+                Log.Info($"Token 全站基准完成: {TokenUsageFetcher.FmtTokens(usage.SiteTokens)}");
+            }
+        }
+        catch (TokenFetchException e)
+        {
+            _lastTokenFailAt = DateTime.Now;
+            _settings.TokenUsage ??= new TokenUsage();
+            _settings.TokenUsage.LastError = e.Message;
+            Log.Warn($"Token 基准失败: {e.Message}");
+        }
+        catch (Exception e)
+        {
+            _lastTokenFailAt = DateTime.Now;
+            _settings.TokenUsage ??= new TokenUsage();
+            _settings.TokenUsage.LastError = e.Message;
+            Log.Error($"Token 基准异常: {e}");
+        }
+        finally
+        {
+            _tokenBusy = false;
+            UpdateTokenMenuItem();
+        }
     }
 
     private async void FetchTokenUsageAsync(bool manual)
@@ -297,7 +365,8 @@ public sealed class TrayAppContext : ApplicationContext
     private void UpdateTokenMenuItem()
     {
         var usage = _settings.TokenUsage;
-        if (_tokenBusy && usage is { BaselineComplete: false })
+        if (_tokenBusy && usage != null
+            && (!usage.BaselineComplete || !usage.YearBaselineComplete || !usage.SiteBaselineComplete))
             _tokenMenuItem.Text = "Token 用量: 统计中…";
         else if (!_settings.TokenEnabled || string.IsNullOrEmpty(_settings.TokenAccessToken)
                  || usage == null || usage.FetchedAt == default)

@@ -66,6 +66,7 @@ public sealed class TokenUsageForm : Form
         _displayTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         _displayTimer.Tick += (_, _) => RefreshDisplay();
         _displayTimer.Start();
+        FormClosed += (_, _) => _displayTimer.Dispose();
 
         RefreshDisplay();
     }
@@ -82,11 +83,19 @@ public sealed class TokenUsageForm : Form
         {
             sb.AppendLine("今日使用: —");
             sb.AppendLine("本月使用: —");
+            sb.AppendLine("今年使用: —");
+            sb.AppendLine("全站使用: —");
         }
         else
         {
             sb.AppendLine($"今日使用: {TokenUsageFetcher.FmtTokens(usage.DayTokens)} token");
             sb.AppendLine($"本月使用: {TokenUsageFetcher.FmtTokens(usage.MonthTokens)} token");
+            sb.AppendLine(usage.YearBaselineComplete
+                ? $"今年使用: {TokenUsageFetcher.FmtTokens(usage.YearTokens)} token"
+                : $"今年使用: 统计中（{usage.Pages} 页）…");
+            sb.AppendLine(usage.SiteBaselineComplete
+                ? $"全站使用: {TokenUsageFetcher.FmtTokens(usage.SiteTokens)} token"
+                : $"全站使用: 统计中（{usage.Pages} 页）…");
         }
         sb.AppendLine(usage == null || usage.LastLogAt == 0
             ? "最近请求: —"
