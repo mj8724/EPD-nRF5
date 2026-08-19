@@ -70,6 +70,7 @@ public static class TokenUsageFetcher
         {
             usage.YearReset = year;
             usage.YearTokens = 0;
+            usage.YearLastLogAt = 0;
             usage.YearBaselineComplete = false;
         }
 
@@ -150,12 +151,12 @@ public static class TokenUsageFetcher
             usage.Pages = 0;
             return;
         }
-        Accumulate(first.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, ref maxCreated);
+        Accumulate(first.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, yearBaseline: false, ref maxCreated);
         for (int p = 2; p <= pages; p++)
         {
             ct.ThrowIfCancellationRequested();
             var page = await FetchPageSkippingAsync(Http, baseUrl, accessToken, p, start, endTs, usage);
-            if (page.items != null) Accumulate(page.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, ref maxCreated);
+            if (page.items != null) Accumulate(page.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, yearBaseline: false, ref maxCreated);
         }
         usage.LastLogAt = maxCreated;
         usage.Pages = pages;
@@ -195,7 +196,7 @@ public static class TokenUsageFetcher
 
         long maxCreated = 0;
         int done = 0;
-        Accumulate(first.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, ref maxCreated);
+        Accumulate(first.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, yearBaseline: false, ref maxCreated);
         done++;
 
         for (int basePage = 2; basePage <= pages; basePage += ParallelPages)
@@ -210,7 +211,7 @@ public static class TokenUsageFetcher
             }
             var results = await Task.WhenAll(batch);
             foreach (var r in results)
-                if (r.items != null) Accumulate(r.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, ref maxCreated);
+                if (r.items != null) Accumulate(r.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, yearBaseline: false, ref maxCreated);
             done += results.Length;
             progress?.Invoke($"统计中 {done}/{pages} 页…");
         }
@@ -253,7 +254,7 @@ public static class TokenUsageFetcher
     }
 
     private static void Accumulate(JsonElement[] items, TokenUsage usage, bool dedup,
-        long monthStart, long dayStart, long yearStart, bool dayRebuild, ref long maxCreated)
+        long monthStart, long dayStart, long yearStart, bool dayRebuild, bool yearBaseline, ref long maxCreated)
     {
         foreach (var it in items)
         {
@@ -265,8 +266,9 @@ public static class TokenUsageFetcher
             bool countMonth = createdAt >= monthStart && (!dedup || createdAt > usage.LastLogAt);
             // 日累计：跨日重扫（dayRebuild）时重建全量今日（含月已计过但日被重置的条目）；普通增量只加新条目
             bool countDay = createdAt >= dayStart && (dayRebuild || countMonth);
-            // 年累计：只在带游标去重的扫描（增量/年基准）中累计，月基准（dedup=false 全量重扫）不重复累计年
-            bool countYear = createdAt >= yearStart && (dedup && createdAt > usage.LastLogAt);
+            // 年累计：独立年游标去重；仅在年基准（yearBaseline）或年基准已完成后的增量中累计
+            bool countYear = (yearBaseline || usage.YearBaselineComplete)
+                             && createdAt >= yearStart && createdAt > usage.YearLastLogAt;
             if (countMonth) usage.MonthTokens += pt + cpt;
             if (countDay) usage.DayTokens += pt + cpt;
             if (countYear) usage.YearTokens += pt + cpt;
@@ -301,14 +303,17 @@ public static class TokenUsageFetcher
         usage.Pages = pages;
         if (pages == 0)
         {
+            usage.YearLastLogAt = 0;
             usage.YearBaselineComplete = true;
             usage.BaselineComplete = true;
             return;
         }
+        // 无年游标 = 全新统计（含上次失败残留的脏累计），清零后从今年 1 月 1 日全量重建
+        if (usage.YearLastLogAt == 0) usage.YearTokens = 0;
 
-        long maxCreated = usage.LastLogAt;
+        long maxCreated = usage.YearLastLogAt;
         int done = 0;
-        Accumulate(first.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, ref maxCreated);
+        Accumulate(first.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, yearBaseline: true, ref maxCreated);
         done++;
         for (int basePage = 2; basePage <= pages; basePage += ParallelPages)
         {
@@ -322,11 +327,14 @@ public static class TokenUsageFetcher
             }
             var results = await Task.WhenAll(batch);
             foreach (var r in results)
-                if (r.items != null) Accumulate(r.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, ref maxCreated);
+                if (r.items != null) Accumulate(r.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, yearBaseline: true, ref maxCreated);
             done += results.Length;
             progress?.Invoke($"今年基准 {done}/{pages} 页…");
         }
-        usage.LastLogAt = maxCreated;
+        // 注意：游标只在最后推进——分页按最新在前，运行中推进会把游标推到最后一条时间戳，
+        // 其余更早的批次全部被去重跳过（历史 bug）。运行中去重基准值 = 起始游标。
+        usage.YearLastLogAt = maxCreated;
+        usage.LastLogAt = maxCreated; // 扫描覆盖到 now：月/日计数已含 >LastLogAt 的条目，推进游标防增量重复
         usage.YearBaselineComplete = true;
         usage.BaselineComplete = true; // 今年窗口覆盖本月 → 月基准一并完成
     }
@@ -342,6 +350,14 @@ public static class TokenUsageFetcher
         var endTs = DateTimeOffset.Now.ToUnixTimeSeconds();
 
         var first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, 0, endTs, usage);
+        if (first.items == null) // 关键页：再多试 2 次（间隔 5s），扛瞬时抖动/慢查询
+        {
+            for (int i = 0; i < 2 && first.items == null; i++)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, 0, endTs, usage);
+            }
+        }
         if (first.items == null)
             throw new TokenFetchException("第 1 页获取失败，无法确定全站日志总量（访问令牌可能非管理员）");
         long total = first.total;
@@ -355,6 +371,8 @@ public static class TokenUsageFetcher
             return;
         }
 
+        // 无站点游标 = 全新统计，清零防残留（崩溃恢复时游标未持久化，重扫全量）
+        if (usage.SiteLastLogAt == 0) usage.SiteTokens = 0;
         long maxCreated = usage.SiteLastLogAt;
         int done = 0;
         AccumulateSite(first.items, usage, ref maxCreated);
@@ -375,6 +393,7 @@ public static class TokenUsageFetcher
             done += results.Length;
             progress?.Invoke($"全站基准 {done}/{pages} 页…");
         }
+        // 游标只在最后推进（分页最新在前，运行中推进会让更早批次全被去重）
         usage.SiteLastLogAt = maxCreated;
         usage.SiteBaselineComplete = true;
     }
@@ -404,7 +423,7 @@ public static class TokenUsageFetcher
     private static async Task<(JsonElement[]? items, long total)> FetchSitePageSkippingAsync(
         HttpClient http, string baseUrl, string accessToken, int p, long start, long end, TokenUsage usage)
     {
-        var url = $"{baseUrl}/api/log?p={p}&page_size={PageSize}&type=2&start_timestamp={start}&end_timestamp={end}";
+        var url = $"{baseUrl}/api/log/?p={p}&page_size={PageSize}&type=2&start_timestamp={start}&end_timestamp={end}";
         JsonDocument doc;
         try
         {

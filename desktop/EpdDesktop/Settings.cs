@@ -48,6 +48,7 @@ public class TokenUsage
     public string DayReset { get; set; } = "";    // "yyyy-MM-dd"；fetcher 检测跨日重置
     public long YearTokens { get; set; }          // 今年累计 token（created_at >= 本地今年 1 月 1 日）
     public string YearReset { get; set; } = "";   // "yyyy"；fetcher 检测跨年重置
+    public long YearLastLogAt { get; set; }       // 今年增量游标（独立于个人 LastLogAt：年基准以它去重）
     public bool YearBaselineComplete { get; set; } // 今年基准是否建完（首次后台扫描）
     public long SiteTokens { get; set; }          // 全站累计 token（admin /api/log，全用户）
     public long SiteLastLogAt { get; set; }       // 全站增量游标
