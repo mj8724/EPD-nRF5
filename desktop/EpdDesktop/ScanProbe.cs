@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
@@ -102,6 +103,87 @@ internal static class ScanProbe
         catch (Exception e)
         {
             sb.AppendLine($"抓取失败: {e.Message}");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>--token：读取设置中的 Token 配置并执行一次完整更新（增量或建基准），打印结果。</summary>
+    public static async Task<string> TokenAsync()
+    {
+        var sb = new StringBuilder();
+        var settings = Settings.Load();
+        sb.AppendLine($"API 地址: {settings.TokenApiBase}");
+        bool hasToken = !string.IsNullOrEmpty(settings.TokenAccessToken);
+        sb.AppendLine(hasToken ? "访问令牌: 已配置" : "访问令牌: 未配置（请在设置窗体中填写）");
+        if (!hasToken) return sb.ToString();
+
+        var usage = settings.TokenUsage ?? new TokenUsage();
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await TokenUsageFetcher.UpdateAsync(usage, settings.TokenApiBase, settings.TokenAccessToken!,
+                progress: m => sb.AppendLine($"  {m}"));
+            settings.TokenUsage = usage;
+            Settings.Save(settings);
+            sb.AppendLine($"今日 token: {TokenUsageFetcher.FmtTokens(usage.DayTokens)}");
+            sb.AppendLine($"本月 token: {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}" +
+                          $"（{(usage.Partial ? "部分，有页面失败" : "完整")}）");
+            sb.AppendLine(usage.LastLogAt == 0
+                ? "最近请求: —"
+                : $"最近请求: {DateTimeOffset.FromUnixTimeSeconds(usage.LastLogAt).ToLocalTime():MM-dd HH:mm}");
+            sb.AppendLine($"页数: {usage.Pages}");
+            sb.AppendLine($"耗时: {sw.Elapsed.TotalSeconds:F1} 秒");
+        }
+        catch (TokenFetchException e)
+        {
+            sb.AppendLine($"更新失败: {e.Message}");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>--pushtoken：采集（如缺数据）并推送 Token 用量面板到墨水屏。</summary>
+    public static async Task<string> PushTokenAsync()
+    {
+        var sb = new StringBuilder();
+        var settings = Settings.Load();
+        if (string.IsNullOrEmpty(settings.TokenAccessToken))
+        {
+            sb.AppendLine("未配置访问令牌，请在设置窗体中填写");
+            return sb.ToString();
+        }
+        if (string.IsNullOrEmpty(settings.DeviceAddress))
+        {
+            sb.AppendLine("未配置设备，请在设置窗体中选择墨水屏");
+            return sb.ToString();
+        }
+        var usage = settings.TokenUsage;
+        if (usage == null || usage.FetchedAt == default)
+        {
+            sb.AppendLine("尚无 Token 数据，正在采集…");
+            usage ??= new TokenUsage();
+            try
+            {
+                await TokenUsageFetcher.UpdateAsync(usage, settings.TokenApiBase, settings.TokenAccessToken!);
+                settings.TokenUsage = usage;
+                Settings.Save(settings);
+            }
+            catch (TokenFetchException e)
+            {
+                sb.AppendLine($"采集失败: {e.Message}");
+                return sb.ToString();
+            }
+        }
+        var addr = ulong.Parse(settings.DeviceAddress, System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            var result = await EpdPusher.PushTokenAsync(addr, usage, settings);
+            sb.AppendLine($"Token 面板推送成功: 今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · 本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
+            sb.AppendLine($"{result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} model=0x{result.ModelId:X2} MTU={result.Mtu}");
+            sb.AppendLine("已保持连接等待面板刷新完成（约 25 秒）");
+        }
+        catch (Exception e)
+        {
+            sb.AppendLine($"推送失败: {e.Message}");
         }
         return sb.ToString();
     }

@@ -14,13 +14,19 @@ public sealed class TrayAppContext : ApplicationContext
     private readonly ToolStripMenuItem _modeRates;
     private readonly ToolStripMenuItem _modeCalendar;
     private readonly ToolStripMenuItem _modeClock;
+    private readonly ToolStripMenuItem _modeToken;
     private readonly ToolStripMenuItem _autoStartItem;
+    private readonly ToolStripMenuItem _tokenMenuItem;
     private readonly System.Threading.Timer _pollTimer;
+    private readonly SynchronizationContext? _uiContext; // 主线程 UI 上下文（OnPoll 在 timer 线程回调）
 
     private AppSettings _settings;
     private bool _pushing;
     private DateTime? _lastPushTime;
     private bool _lastPushOk;
+
+    private bool _tokenBusy;
+    private DateTime? _lastTokenFailAt; // 失败退避：15 分钟内不自动重试（避免刷屏）
 
     public TrayAppContext()
     {
@@ -33,11 +39,12 @@ public sealed class TrayAppContext : ApplicationContext
         _modeRates = new ToolStripMenuItem("汇率图", null, (_, _) => PushRatesAsync(manual: true)) { CheckOnClick = true };
         _modeCalendar = new ToolStripMenuItem("日历", null, (_, _) => SwitchModeAsync(1, "日历")) { CheckOnClick = true };
         _modeClock = new ToolStripMenuItem("时钟", null, (_, _) => SwitchModeAsync(2, "时钟")) { CheckOnClick = true };
+        _modeToken = new ToolStripMenuItem("Token 用量", null, (_, _) => SwitchToTokenAsync()) { CheckOnClick = true };
         _modeRates.Checked = true;
-        foreach (var item in new[] { _modeRates, _modeCalendar, _modeClock })
+        foreach (var item in new[] { _modeRates, _modeCalendar, _modeClock, _modeToken })
             item.CheckedChanged += (_, _) => SyncModeChecks();
 
-        _modeMenu = new ToolStripMenuItem("显示模式", null, _modeRates, _modeCalendar, _modeClock);
+        _modeMenu = new ToolStripMenuItem("显示模式", null, _modeRates, _modeCalendar, _modeClock, _modeToken);
         _autoStartItem = new ToolStripMenuItem("开机自启", null, (sender, _) =>
         {
             if (sender is ToolStripMenuItem item)
@@ -50,8 +57,15 @@ public sealed class TrayAppContext : ApplicationContext
         { CheckOnClick = true, Checked = _settings.AutoStart };
 
         _menu = new ContextMenuStrip();
+        // OnPoll 由 System.Threading.Timer 在线程池回调，Token 更新涉及 UI 控件 →
+        // 显式保证主线程装有 WindowsFormsSynchronizationContext，供 Post 回主线程。
+        if (SynchronizationContext.Current == null)
+            SynchronizationContext.SetSynchronizationContext(new WindowsFormsSynchronizationContext());
+        _uiContext = SynchronizationContext.Current;
         _menu.Items.Add("立即推送汇率", null, (_, _) => PushRatesAsync(manual: true));
         _menu.Items.Add("更新汇率数据", null, (_, _) => UpdateRatesAsync());
+        _tokenMenuItem = new ToolStripMenuItem("Token 用量: 未配置", null, (_, _) => ShowTokenUsage());
+        _menu.Items.Add(_tokenMenuItem);
         _menu.Items.Add(_modeMenu);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("设置…", null, (_, _) => ShowSettings());
@@ -69,6 +83,7 @@ public sealed class TrayAppContext : ApplicationContext
         _tray.DoubleClick += (_, _) => ShowSettings();
 
         UpdateStatus();
+        UpdateTokenMenuItem();
         // 首次运行引导：未配置设备时自动打开设置窗体选择墨水屏
         if (string.IsNullOrEmpty(_settings.DeviceAddress))
         {
@@ -87,6 +102,9 @@ public sealed class TrayAppContext : ApplicationContext
     // 推送时刻直接用备好的数据（不受推送瞬间网络影响）。
     private void OnPoll(object? state)
     {
+        // Token 用量更新：与汇率调度完全独立（不互斥，也不受推送相关守卫影响）
+        MaybeUpdateToken();
+
         if (_pushing) return;
         if (!_settings.ScheduledPushEnabled) return;
         if (string.IsNullOrEmpty(_settings.DeviceAddress)) return;
@@ -110,7 +128,201 @@ public sealed class TrayAppContext : ApplicationContext
         UpdateStatus();
     }
 
-    // ── 汇率推送 ──────────────────────────────────
+    // ── Token 用量更新（newapi 中转站，独立于汇率调度） ──
+    private void MaybeUpdateToken()
+    {
+        if (!_settings.TokenEnabled || string.IsNullOrEmpty(_settings.TokenAccessToken)) return;
+        var usage = _settings.TokenUsage;
+        bool due = usage == null || usage.FetchedAt == default
+                   || (DateTime.Now - usage.FetchedAt).TotalHours >= _settings.TokenUpdateHours;
+        if (!due) return;
+        // 免打扰时段：跳过执行、计时继续，恢复后因 due 立即补拉
+        if (InQuietHours(_settings.TokenQuietStart, _settings.TokenQuietEnd, DateTime.Now.TimeOfDay)) return;
+        // 失败退避：15 分钟内不自动重试（避免刷屏）
+        if (_lastTokenFailAt is { } f && (DateTime.Now - f).TotalMinutes < 15) return;
+        if (_uiContext != null && _uiContext != SynchronizationContext.Current)
+            _uiContext.Post(_ => FetchTokenUsageAsync(manual: false), null);
+        else
+            FetchTokenUsageAsync(manual: false);
+    }
+
+    private async void FetchTokenUsageAsync(bool manual)
+    {
+        if (_tokenBusy)
+        {
+            if (manual) ShowBalloon("Token 用量", "正在更新中，请稍候", ToolTipIcon.Info);
+            return;
+        }
+        if (string.IsNullOrEmpty(_settings.TokenAccessToken))
+        {
+            if (manual)
+                ShowBalloon("Token 用量", "未配置访问令牌，请在设置中填写", ToolTipIcon.Warning);
+            return;
+        }
+        bool ok = await FetchTokenCoreAsync();
+        var usage = _settings.TokenUsage;
+        if (ok)
+        {
+            Log.Info($"Token 用量更新: 今日 {TokenUsageFetcher.FmtTokens(usage!.DayTokens)} · " +
+                     $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}（{(usage.Partial ? "部分" : "完整")}）");
+            if (manual)
+                ShowBalloon("Token 已更新",
+                    $"今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · " +
+                    $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
+            // 当前显示的是 Token 面板 → 数据更新后自动重推
+            if (_modeToken.Checked) await PushTokenPanelAsync(manualBalloon: false);
+        }
+        else if (manual || usage == null || usage.FetchedAt == default
+                 || (DateTime.Now - usage.FetchedAt).TotalHours > 24)
+        {
+            ShowBalloon("Token 更新失败", usage?.LastError ?? "未知错误", ToolTipIcon.Warning);
+        }
+    }
+
+    /// <summary>执行一次采集并落盘；无 UI 副作用，返回是否成功（供自动/切换流程复用）。</summary>
+    private async Task<bool> FetchTokenCoreAsync()
+    {
+        if (_tokenBusy) return false;
+        if (string.IsNullOrEmpty(_settings.TokenAccessToken)) return false;
+        _tokenBusy = true;
+        UpdateTokenMenuItem();
+        try
+        {
+            var usage = _settings.TokenUsage ?? new TokenUsage();
+            _settings.TokenUsage = usage; // 统计过程中窗体/菜单也能看到对象（如 Pages）
+            await TokenUsageFetcher.UpdateAsync(usage, _settings.TokenApiBase, _settings.TokenAccessToken,
+                progress: m => Log.Info($"Token 更新: {m}"));
+            _settings.TokenUsage = usage;
+            Settings.Save(_settings);
+            return true;
+        }
+        catch (TokenFetchException e)
+        {
+            _lastTokenFailAt = DateTime.Now;
+            _settings.TokenUsage ??= new TokenUsage();
+            _settings.TokenUsage.LastError = e.Message; // 仅内存，不随失败落盘
+            Log.Warn($"Token 用量更新失败: {e.Message}");
+            return false;
+        }
+        catch (Exception e)
+        {
+            _lastTokenFailAt = DateTime.Now;
+            _settings.TokenUsage ??= new TokenUsage();
+            _settings.TokenUsage.LastError = e.Message;
+            Log.Error($"Token 用量更新异常: {e}");
+            return false;
+        }
+        finally
+        {
+            _tokenBusy = false;
+            UpdateTokenMenuItem();
+        }
+    }
+
+    /// <summary>切换到 Token 面板：数据过期/缺失先采集，再推送到墨水屏（PICTURE 模式）。</summary>
+    private async void SwitchToTokenAsync()
+    {
+        if (!_settings.TokenEnabled || string.IsNullOrEmpty(_settings.TokenAccessToken))
+        {
+            ShowBalloon("Token 用量", "未启用或未配置访问令牌（设置 → Token 用量）", ToolTipIcon.Warning);
+            return;
+        }
+        var usage = _settings.TokenUsage;
+        if (usage == null || usage.FetchedAt == default
+            || (DateTime.Now - usage.FetchedAt).TotalHours >= _settings.TokenUpdateHours)
+        {
+            // 数据过期/缺失：先采集（手动切换不受免打扰限制）
+            await FetchTokenCoreAsync();
+        }
+        if (_settings.TokenUsage is not { } u || u.FetchedAt == default)
+        {
+            ShowBalloon("Token 面板", "数据获取失败，无法推送", ToolTipIcon.Warning);
+            return;
+        }
+        await PushTokenPanelAsync(manualBalloon: true);
+    }
+
+    /// <summary>渲染并推送 Token 面板（三色屏带红平面）；成功时把显示模式勾选同步到 Token。</summary>
+    private async Task PushTokenPanelAsync(bool manualBalloon)
+    {
+        if (_pushing)
+        {
+            if (manualBalloon) ShowBalloon("忙", "推送任务进行中，请稍候");
+            return;
+        }
+        if (string.IsNullOrEmpty(_settings.DeviceAddress))
+        {
+            if (manualBalloon) ShowBalloon("未配置设备", "请先在「设置」中选择墨水屏设备");
+            return;
+        }
+        var usage = _settings.TokenUsage;
+        if (usage == null || usage.FetchedAt == default)
+        {
+            if (manualBalloon) ShowBalloon("Token 面板", "尚无 Token 数据，请先更新", ToolTipIcon.Warning);
+            return;
+        }
+        _pushing = true;
+        try
+        {
+            var addr = ulong.Parse(_settings.DeviceAddress, CultureInfo.InvariantCulture);
+            var result = await EpdPusher.PushTokenAsync(addr, usage, _settings);
+            _lastPushOk = true;
+            _lastPushTime = DateTime.Now;
+            SetModeChecked(_modeToken); // 设备当前显示 Token 面板
+            Log.Info($"Token 面板推送成功: 今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · " +
+                     $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)} " +
+                     $"({result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} model=0x{result.ModelId:X2})");
+            if (manualBalloon)
+                ShowBalloon("Token 面板已推送",
+                    $"今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · 本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
+        }
+        catch (Exception e)
+        {
+            Log.Warn($"Token 面板推送失败: {e.Message}");
+            if (manualBalloon) ShowBalloon("Token 面板推送失败", e.Message, ToolTipIcon.Warning);
+        }
+        finally
+        {
+            _pushing = false;
+            UpdateStatus();
+        }
+    }
+
+    private void UpdateTokenMenuItem()
+    {
+        var usage = _settings.TokenUsage;
+        if (_tokenBusy && usage is { BaselineComplete: false })
+            _tokenMenuItem.Text = "Token 用量: 统计中…";
+        else if (!_settings.TokenEnabled || string.IsNullOrEmpty(_settings.TokenAccessToken)
+                 || usage == null || usage.FetchedAt == default)
+            _tokenMenuItem.Text = "Token 用量: 未配置";
+        else
+            _tokenMenuItem.Text = $"Token 用量: 今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · " +
+                                  $"本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}";
+    }
+
+    /// <summary>跨线程安全地把显示模式勾选切到指定项（推送可能在 timer 线程/线程池 continuation 完成）。</summary>
+    private void SetModeChecked(ToolStripMenuItem item)
+    {
+        if (_uiContext != null && _uiContext != SynchronizationContext.Current)
+            _uiContext.Post(_ => item.Checked = true, null);
+        else
+            item.Checked = true;
+    }
+
+    /// <summary>免打扰判定：start &lt;= end → 区间内；跨午夜 → 分两段。解析失败返回 false（不豁免）。</summary>
+    private static bool InQuietHours(string start, string end, TimeSpan now)
+    {
+        if (!TimeOnly.TryParse(start, out var s) || !TimeOnly.TryParse(end, out var e)) return false;
+        return s <= e ? now >= s.ToTimeSpan() && now < e.ToTimeSpan()
+                      : now >= s.ToTimeSpan() || now < e.ToTimeSpan();
+    }
+
+    private void ShowTokenUsage()
+    {
+        using var form = new TokenUsageForm(_settings, () => FetchTokenUsageAsync(manual: true), ShowSettings);
+        form.ShowDialog();
+    }
     private async void PushRatesAsync(bool manual)
     {
         if (_pushing)
@@ -185,6 +397,7 @@ public sealed class TrayAppContext : ApplicationContext
                     Settings.Save(_settings);
                     _lastPushOk = true;
                     _lastPushTime = DateTime.Now;
+                    SetModeChecked(_modeRates); // 设备当前显示汇率图
                     Log.Info($"推送成功: {_settings.DeviceName} ({data.Date}{(data.FromCache ? ", 缓存" : "")}) " +
                              $"model=0x{result.ModelId:X2} {result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} MTU={result.Mtu} RLE={result.Rle}");
                     ShowBalloon("推送成功", $"汇率已推送至 {_settings.DeviceName ?? "墨水屏"}（{data.Date}）");
@@ -266,7 +479,7 @@ public sealed class TrayAppContext : ApplicationContext
     private void SyncModeChecks()
     {
         // 单选语义：只有一个勾选
-        var items = new[] { _modeRates, _modeCalendar, _modeClock };
+        var items = new[] { _modeRates, _modeCalendar, _modeClock, _modeToken };
         if (items.Count(i => i.Checked) > 1)
         {
             // 保留最后点击的（CheckedChanged 已置位），取消其它
@@ -315,10 +528,12 @@ public sealed class TrayAppContext : ApplicationContext
     // ── 设置窗体 ──────────────────────────────────
     private void ShowSettings()
     {
-        using var form = new SettingsForm(_settings, () => PushRatesAsync(manual: true), p => UpdateRatesAsync(p));
+        using var form = new SettingsForm(_settings, () => PushRatesAsync(manual: true),
+            p => UpdateRatesAsync(p), () => FetchTokenUsageAsync(manual: true), ShowTokenUsage);
         form.ShowDialog();
         _settings = Settings.Load(); // 重新读取（窗体已保存）
         _autoStartItem.Checked = _settings.AutoStart;
+        UpdateTokenMenuItem();
         UpdateStatus();
     }
 

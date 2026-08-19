@@ -42,6 +42,16 @@ internal static class Program
             Environment.Exit(RunCli("fetch", null));
             return;
         }
+        if (args.Any(a => a.Equals("--token", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.Exit(RunCli("token", null));
+            return;
+        }
+        if (args.Any(a => a.Equals("--pushtoken", StringComparison.OrdinalIgnoreCase)))
+        {
+            Environment.Exit(RunCli("pushtoken", null));
+            return;
+        }
 
         using var mutex = new Mutex(true, "EpdDesktop_SingleInstance", out bool createdNew);
         if (!createdNew)
@@ -71,6 +81,8 @@ internal static class Program
                 "probe" => ScanProbe.ProbeAsync(ParseAddress(arg!)).GetAwaiter().GetResult(),
                 "push" => ScanProbe.PushAsync(ParseAddress(arg!)).GetAwaiter().GetResult(),
                 "fetch" => ScanProbe.FetchAsync().GetAwaiter().GetResult(),
+                "token" => ScanProbe.TokenAsync().GetAwaiter().GetResult(),
+                "pushtoken" => ScanProbe.PushTokenAsync().GetAwaiter().GetResult(),
                 _ => "未知模式",
             };
             var report = Path.Combine(Path.GetTempPath(), $"epd-{mode}.txt");

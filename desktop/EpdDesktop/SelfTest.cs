@@ -62,6 +62,22 @@ internal static class SelfTest
             if (redPixels == 0) throw new Exception("红平面未检出红色像素（上涨数据应渲染为红色）");
             sb.AppendLine($"三色渲染自检通过: 红像素字节数 {redPixels}");
 
+            // Token 用量面板：长度一致；红色标题/分隔线 → 红平面必须有红像素；黑白路径长度一致
+            var tUsage = new TokenUsage
+            {
+                DayTokens = 3_450_000, MonthTokens = 1_560_000_000,
+                DayQuota = 35_000_000, MonthQuota = 3_479_000_000,
+                BalanceQuota = 6_780_000_000_000, LastLogAt = DateTimeOffset.Now.ToUnixTimeSeconds(),
+                FetchedAt = DateTime.Now,
+            };
+            var (tbw, tred) = TokenImageRenderer.Render2(400, 300, tUsage, DateTime.Now);
+            if (tbw.Length != expected || tred.Length != expected) throw new Exception("Token 面板三色平面长度错误");
+            int tRedPixels = tred.Count(b => b != 0xFF);
+            if (tRedPixels == 0) throw new Exception("Token 面板红平面未检出红色像素（红色标题应渲染为红）");
+            var tbwOnly = TokenImageRenderer.Render(400, 300, tUsage, DateTime.Now);
+            if (tbwOnly.Length != expected) throw new Exception("Token 面板黑白平面长度错误");
+            sb.AppendLine($"Token 面板渲染自检通过: 红像素字节数 {tRedPixels}");
+
             using (var bmp = RateImageRenderer.RenderBitmap(400, 300, DateTime.Today, rows))
             {
                 var pngPath = Path.Combine(Path.GetTempPath(), "epd-sample-400x300.png");

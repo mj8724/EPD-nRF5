@@ -52,6 +52,17 @@ public static class RatesFetcher
         try
         {
             var (date, today, history) = await FetchNetworkWithRetryAsync(progress);
+            // jsdelivr 版本采样失败（VND/KZT/KES 历史缺失）时保留旧缓存历史：
+            // 采样结果为空/不足 2 点的币种沿用上次的采样点，避免 0 点历史覆盖损坏缓存
+            //（data.jsdelivr.com 曾实测超时不可达，而主数据 cdn.jsdelivr.net 正常）。
+            if (settings.Cache is { History.Count: > 0 })
+            {
+                foreach (var (code, oldPts) in settings.Cache.History)
+                {
+                    if (oldPts.Count >= 2 && (!history.TryGetValue(code, out var pts) || pts.Count < 2))
+                        history[code] = oldPts;
+                }
+            }
             progress?.Invoke("数据抓取完成，正在计算波动…");
             var data = new RatesData { Date = date, Today = today, History = history };
             ComputeChanges(data);

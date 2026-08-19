@@ -25,6 +25,33 @@ public class AppSettings
     public string? LastPushDate { get; set; }       // "yyyy-MM-dd"，仅成功推送时更新
     public string? LastFetchDate { get; set; }      // "yyyy-MM-dd"，每日自动抓取成功时更新（推送前 30 分钟）
     public RateCache? Cache { get; set; }           // 最近一次成功抓取的汇率
+
+    // ── Token 用量（newapi 中转站） ──
+    public bool TokenEnabled { get; set; }                          // 默认 false
+    public string TokenApiBase { get; set; } = "https://newapi.liubaitech.cn";
+    public string? TokenAccessToken { get; set; }                   // 用户粘贴的访问令牌（明文，与现有设置一致）
+    public int TokenUpdateHours { get; set; } = 4;                  // 更新间隔（小时）；Sanitize 钳制 1..24
+    public string TokenQuietStart { get; set; } = "22:00";          // 免打扰开始 HH:mm
+    public string TokenQuietEnd { get; set; } = "08:00";            // 免打扰结束 HH:mm
+    public TokenUsage? TokenUsage { get; set; }                     // 上次采集结果 + 增量累计
+}
+
+/// <summary>Token 用量采集结果（存于 AppSettings.TokenUsage，随 settings.json 持久化）。</summary>
+public class TokenUsage
+{
+    public string Month { get; set; } = "";       // "yyyy-MM"；fetcher 检测切换并重置
+    public long MonthTokens { get; set; }         // 本月累计 token（prompt+completion）
+    public long MonthQuota { get; set; }          // 本月消耗 quota（显示时 ÷500000 = 元）
+    public long DayTokens { get; set; }           // 今日累计 token（created_at >= 本地今日 0 点）
+    public long DayQuota { get; set; }            // 今日消耗 quota（stat 今日窗口）
+    public string DayReset { get; set; } = "";    // "yyyy-MM-dd"；fetcher 检测跨日重置
+    public long BalanceQuota { get; set; }        // 账户余额 quota（user/self）
+    public long LastLogAt { get; set; }           // 已统计到的最新一条日志 unix 秒（增量游标）
+    public DateTime FetchedAt { get; set; }       // 上次成功更新
+    public bool BaselineComplete { get; set; }    // 本月基准是否已建完
+    public bool Partial { get; set; }             // 本次更新是否有页失败（显示"部分"）
+    public int Pages { get; set; }                // 最近一次更新的页数（增量页数或基准总页数）
+    public string? LastError { get; set; }        // 上次失败原因（仅内存，不随失败落盘）
 }
 
 /// <summary>设置持久化与读取。</summary>
@@ -75,6 +102,10 @@ public static class Settings
             s.PanelHeight = 300;
         }
         if (!TimeOnly.TryParse(s.PushTime, out _)) s.PushTime = "09:00";
+        if (s.TokenUpdateHours < 1 || s.TokenUpdateHours > 24) s.TokenUpdateHours = 4;
+        if (!TimeOnly.TryParse(s.TokenQuietStart, out _)) s.TokenQuietStart = "22:00";
+        if (!TimeOnly.TryParse(s.TokenQuietEnd, out _)) s.TokenQuietEnd = "08:00";
+        if (string.IsNullOrWhiteSpace(s.TokenApiBase)) s.TokenApiBase = "https://newapi.liubaitech.cn";
         return s;
     }
 }

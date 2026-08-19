@@ -9,6 +9,23 @@ public sealed record PushResult(int Width, int Height, bool ThreeColor, byte Mod
 public static class EpdPusher
 {
     public static async Task<PushResult> PushRatesAsync(ulong addr, RatesData data, AppSettings settings)
+        => await PushAsync(addr, settings, (w, h, threeColor) =>
+            threeColor
+                ? RateImageRenderer.Render2(w, h, DateTime.Today, BuildRows(data))
+                : (RateImageRenderer.Render(w, h, DateTime.Today, BuildRows(data)), null));
+
+    /// <summary>Token 用量面板推送（PICTURE 模式，与汇率图同流程）。</summary>
+    public static async Task<PushResult> PushTokenAsync(ulong addr, TokenUsage usage, AppSettings settings)
+        => await PushAsync(addr, settings, (w, h, threeColor) =>
+            threeColor
+                ? TokenImageRenderer.Render2(w, h, usage, DateTime.Now)
+                : (TokenImageRenderer.Render(w, h, usage, DateTime.Now), null));
+
+    /// <summary>共享推送流程：连接 → 版本检查 → INIT（等 mtu/model 通知）→ 按面板型号决定分辨率与颜色模式渲染 →
+    /// 发送黑白平面（三色屏再发红色平面）→ REFRESH → 保持连接覆盖完整刷新时间（写响应先于刷新完成返回，
+    /// 立即断开会触发固件 sleep 中断刷新 → 灰屏中间态）。</summary>
+    private static async Task<PushResult> PushAsync(
+        ulong addr, AppSettings settings, Func<int, int, bool, (byte[] bw, byte[]? red)> render)
     {
         using var ble = new BleClient();
         await ble.ConnectAsync(addr);
@@ -24,17 +41,7 @@ public static class EpdPusher
         int h = panel?.Height ?? settings.PanelHeight;
         bool threeColor = panel?.ThreeColor ?? settings.ThreeColor;
 
-        var rows = BuildRows(data);
-        byte[]? redPlane = null;
-        byte[] bwPlane;
-        if (threeColor)
-        {
-            (bwPlane, redPlane) = RateImageRenderer.Render2(w, h, DateTime.Today, rows);
-        }
-        else
-        {
-            bwPlane = RateImageRenderer.Render(w, h, DateTime.Today, rows);
-        }
+        var (bwPlane, redPlane) = render(w, h, threeColor);
 
         await ble.SendImageAsync(bwPlane, isRed: false);
         if (redPlane != null) await ble.SendImageAsync(redPlane, isRed: true);
