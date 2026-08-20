@@ -19,7 +19,7 @@ public sealed class TokenFetchException : Exception
 public static class TokenUsageFetcher
 {
     public const int PageSize = 100;           // 接口上限
-    public const int ParallelPages = 6;        // 建基准并发
+    public const int ParallelPages = 1;        // 建基准并发：站点 DB 在 3 并发深分页下持续报 Database error，改串行减负（服务端本就串行处理，速度几乎不变）
 
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(30) };
 
@@ -137,13 +137,8 @@ public static class TokenUsageFetcher
         long maxCreated = usage.LastLogAt;
         int pages = 0;
 
-        // 先取第 1 页拿 total，确定页数
-        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, start, endTs, usage);
-        if (first.items == null) // 第 1 页两次失败：跳过本轮，游标不变，下轮重试
-        {
-            usage.Pages = 0;
-            return;
-        }
+        // 先取第 1 页拿 total，确定页数（失败会抛异常中止本轮，游标不动，下轮重试）
+        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, start, endTs);
         long total = first.total;
         pages = (int)((total + PageSize - 1) / PageSize);
         if (pages == 0)
@@ -155,8 +150,8 @@ public static class TokenUsageFetcher
         for (int p = 2; p <= pages; p++)
         {
             ct.ThrowIfCancellationRequested();
-            var page = await FetchPageSkippingAsync(Http, baseUrl, accessToken, p, start, endTs, usage);
-            if (page.items != null) Accumulate(page.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, yearBaseline: false, ref maxCreated);
+            var page = await FetchPageSkippingAsync(Http, baseUrl, accessToken, p, start, endTs);
+            Accumulate(page.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: daySwitched, yearBaseline: false, ref maxCreated);
         }
         usage.LastLogAt = maxCreated;
         usage.Pages = pages;
@@ -180,9 +175,7 @@ public static class TokenUsageFetcher
         usage.MonthTokens = 0;
         usage.LastLogAt = 0;
 
-        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, monthStart, endTs, usage);
-        if (first.items == null) // 第 1 页两次失败：无法确定总量，中止本轮（下轮重试）
-            throw new TokenFetchException("第 1 页获取失败，无法确定本月日志总量");
+        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, monthStart, endTs);
         long total = first.total;
         int pages = (int)((total + PageSize - 1) / PageSize);
         if (pages > 5000)
@@ -207,50 +200,42 @@ public static class TokenUsageFetcher
             for (int p = basePage; p < batchEnd; p++)
             {
                 int pageNum = p;
-                batch.Add(Task.Run(() => FetchPageSkippingAsync(Http, baseUrl, accessToken, pageNum, monthStart, endTs, usage)));
+                batch.Add(Task.Run(() => FetchPageSkippingAsync(Http, baseUrl, accessToken, pageNum, monthStart, endTs)));
             }
             var results = await Task.WhenAll(batch);
             foreach (var r in results)
-                if (r.items != null) Accumulate(r.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, yearBaseline: false, ref maxCreated);
+            {
+                Accumulate(r.items, usage, dedup: false, monthStart, dayStart, yearStart, dayRebuild: true, yearBaseline: false, ref maxCreated);
+                int latest = (int)((r.total + PageSize - 1) / PageSize);
+                if (latest > pages) pages = latest; // 运行期间日志增长 → 扩展页数补抓最旧页
+            }
             done += results.Length;
             progress?.Invoke($"统计中 {done}/{pages} 页…");
+            await Task.Delay(300, ct); // 批间间隔：降低站点 DB 压力
         }
         usage.LastLogAt = maxCreated;
         usage.BaselineComplete = true;
     }
 
-    /// <summary>取一页并累加；网络/HTTP 失败重试 1 次后仍失败则跳过该页并标 Partial（不中止整月），
-    /// 返回 items=null 表示该页被跳过。结构异常（缺 data.items / success=false）抛 TokenFetchException 中止本轮。</summary>
-    private static async Task<(JsonElement[]? items, long total)> FetchPageSkippingAsync(
-        HttpClient http, string baseUrl, string accessToken, int p, long start, long end, TokenUsage usage)
+    /// <summary>个人分页（/api/log/self）。失败重试（退避）后仍失败 → 抛异常中止本轮：
+    /// 绝不跳过——跳过的页游标会越过造成永久漏计；中止则整轮失败、游标不动，下轮重试。</summary>
+    private static async Task<(JsonElement[] items, long total)> FetchPageSkippingAsync(
+        HttpClient http, string baseUrl, string accessToken, int p, long start, long end)
     {
         var url = $"{baseUrl}/api/log/self?p={p}&page_size={PageSize}&type=2&start_timestamp={start}&end_timestamp={end}";
-        JsonDocument doc;
-        try
-        {
-            doc = await GetJsonAsync(http, url, accessToken);
-        }
-        catch (TokenFetchException)
-        {
-            await Task.Delay(500);
-            try
-            {
-                doc = await GetJsonAsync(http, url, accessToken);
-            }
-            catch (TokenFetchException)
-            {
-                usage.Partial = true; // 跳过本页，下次增量更新自然补齐
-                return (null, 0);
-            }
-        }
-        using (doc)
-        {
-            if (!doc.RootElement.TryGetProperty("data", out var data)
-                || !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
-                throw new TokenFetchException($"第 {p} 页接口返回异常（缺少 data.items）");
-            long total = data.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt64() : 0;
-            return (items.EnumerateArray().Select(e => e.Clone()).ToArray(), total);
-        }
+        using var doc = await FetchWithRetryAsync(http, url, accessToken, p);
+        if (!doc.RootElement.TryGetProperty("data", out var data)
+            || !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new TokenFetchException($"第 {p} 页接口返回异常（缺少 data.items）");
+        long total = data.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt64() : 0;
+        var arr = items.EnumerateArray().Select(e => e.Clone()).ToArray();
+        // 空页/短页守卫：站点 DB 抖动可能返回空或截断的 items（不算错误、不触发重试）→ 该页计 0/计少造成永久漏计。
+        // 非末页必须满 100 条，否则视为异常响应重试。
+        if (arr.Length == 0 && (long)(p - 1) * PageSize < total)
+            throw new TokenFetchException($"第 {p} 页返回空数据（total={total}）");
+        if (arr.Length < PageSize && (long)p * PageSize < total)
+            throw new TokenFetchException($"第 {p} 页返回截断数据（{arr.Length} 条 < {PageSize}，total={total}）");
+        return (arr, total);
     }
 
     private static void Accumulate(JsonElement[] items, TokenUsage usage, bool dedup,
@@ -293,9 +278,7 @@ public static class TokenUsageFetcher
             TimeZoneInfo.Local.GetUtcOffset(now)).ToUnixTimeSeconds();
         var endTs = DateTimeOffset.Now.ToUnixTimeSeconds();
 
-        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, yearStart, endTs, usage);
-        if (first.items == null)
-            throw new TokenFetchException("第 1 页获取失败，无法确定今年日志总量");
+        var first = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, yearStart, endTs);
         long total = first.total;
         int pages = (int)((total + PageSize - 1) / PageSize);
         if (pages > 5000)
@@ -308,12 +291,22 @@ public static class TokenUsageFetcher
             usage.BaselineComplete = true;
             return;
         }
-        // 无年游标 = 全新统计（含上次失败残留的脏累计），清零后从今年 1 月 1 日全量重建
-        if (usage.YearLastLogAt == 0) usage.YearTokens = 0;
+        // 无年游标 = 全新统计（含上次失败残留的脏累计）：年/月/日全部清零重建。
+        // 注意：必须连同月/日一起清零——中止的基准按批落盘了月/日计数却没推进 LastLogAt，
+        // 若只清零年会用旧游标重复累加月/日（实测月多计 1.4 亿）。
+        if (usage.YearLastLogAt == 0)
+        {
+            usage.YearTokens = 0;
+            usage.MonthTokens = 0;
+            usage.DayTokens = 0;
+            usage.LastLogAt = 0;
+        }
 
         long maxCreated = usage.YearLastLogAt;
         int done = 0;
+        long countedItems = 0;
         Accumulate(first.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, yearBaseline: true, ref maxCreated);
+        countedItems += first.items.Length;
         done++;
         for (int basePage = 2; basePage <= pages; basePage += ParallelPages)
         {
@@ -323,14 +316,25 @@ public static class TokenUsageFetcher
             for (int p = basePage; p < batchEnd; p++)
             {
                 int pageNum = p;
-                batch.Add(Task.Run(() => FetchPageSkippingAsync(Http, baseUrl, accessToken, pageNum, yearStart, endTs, usage)));
+                batch.Add(Task.Run(() => FetchPageSkippingAsync(Http, baseUrl, accessToken, pageNum, yearStart, endTs)));
             }
             var results = await Task.WhenAll(batch);
             foreach (var r in results)
-                if (r.items != null) Accumulate(r.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, yearBaseline: true, ref maxCreated);
+            {
+                Accumulate(r.items, usage, dedup: true, monthStart, dayStart, yearStart, dayRebuild: false, yearBaseline: true, ref maxCreated);
+                countedItems += r.items.Length;
+                // 运行期间日志持续增长（新日志在最新页，最旧页被挤出分页范围）→ 用最新 total 扩展页数，补抓最旧页
+                int latest = (int)((r.total + PageSize - 1) / PageSize);
+                if (latest > pages) pages = latest;
+            }
             done += results.Length;
             progress?.Invoke($"今年基准 {done}/{pages} 页…");
+            await Task.Delay(300, ct); // 批间间隔：降低站点 DB 压力（深分页查询很重）
         }
+        // 完整性校验：重查最新 total，统计条数少于总量-1页 → 有页漏抓/截断，抛异常重跑
+        var check = await FetchPageSkippingAsync(Http, baseUrl, accessToken, 1, yearStart, endTs);
+        if (countedItems < check.total - PageSize)
+            throw new TokenFetchException($"今年基准不完整（统计 {countedItems} 条 < total {check.total}）");
         // 注意：游标只在最后推进——分页按最新在前，运行中推进会把游标推到最后一条时间戳，
         // 其余更早的批次全部被去重跳过（历史 bug）。运行中去重基准值 = 起始游标。
         usage.YearLastLogAt = maxCreated;
@@ -349,17 +353,7 @@ public static class TokenUsageFetcher
         baseUrl = baseUrl.TrimEnd('/');
         var endTs = DateTimeOffset.Now.ToUnixTimeSeconds();
 
-        var first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, 0, endTs, usage);
-        if (first.items == null) // 关键页：再多试 2 次（间隔 5s），扛瞬时抖动/慢查询
-        {
-            for (int i = 0; i < 2 && first.items == null; i++)
-            {
-                await Task.Delay(TimeSpan.FromSeconds(5));
-                first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, 0, endTs, usage);
-            }
-        }
-        if (first.items == null)
-            throw new TokenFetchException("第 1 页获取失败，无法确定全站日志总量（访问令牌可能非管理员）");
+        var first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, 0, endTs);
         long total = first.total;
         int pages = (int)((total + PageSize - 1) / PageSize);
         if (pages > 5000)
@@ -385,13 +379,18 @@ public static class TokenUsageFetcher
             for (int p = basePage; p < batchEnd; p++)
             {
                 int pageNum = p;
-                batch.Add(Task.Run(() => FetchSitePageSkippingAsync(Http, baseUrl, accessToken, pageNum, 0, endTs, usage)));
+                batch.Add(Task.Run(() => FetchSitePageSkippingAsync(Http, baseUrl, accessToken, pageNum, 0, endTs)));
             }
             var results = await Task.WhenAll(batch);
             foreach (var r in results)
-                if (r.items != null) AccumulateSite(r.items, usage, ref maxCreated);
+            {
+                AccumulateSite(r.items, usage, ref maxCreated);
+                int latest = (int)((r.total + PageSize - 1) / PageSize);
+                if (latest > pages) pages = latest; // 运行期间日志增长 → 扩展页数补抓最旧页
+            }
             done += results.Length;
             progress?.Invoke($"全站基准 {done}/{pages} 页…");
+            await Task.Delay(300, ct); // 批间间隔：降低站点 DB 压力
         }
         // 游标只在最后推进（分页最新在前，运行中推进会让更早批次全被去重）
         usage.SiteLastLogAt = maxCreated;
@@ -403,8 +402,7 @@ public static class TokenUsageFetcher
         long endTs, CancellationToken ct)
     {
         var start = usage.SiteLastLogAt > 0 ? usage.SiteLastLogAt - 60 : 0;
-        var first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, start, endTs, usage);
-        if (first.items == null) return;
+        var first = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, 1, start, endTs);
         long total = first.total;
         int pages = (int)((total + PageSize - 1) / PageSize);
         if (pages == 0) return;
@@ -413,43 +411,48 @@ public static class TokenUsageFetcher
         for (int p = 2; p <= pages; p++)
         {
             ct.ThrowIfCancellationRequested();
-            var page = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, p, start, endTs, usage);
-            if (page.items != null) AccumulateSite(page.items, usage, ref maxCreated);
+            var page = await FetchSitePageSkippingAsync(Http, baseUrl, accessToken, p, start, endTs);
+            AccumulateSite(page.items, usage, ref maxCreated);
         }
         usage.SiteLastLogAt = maxCreated;
     }
 
-    /// <summary>全站分页（admin /api/log）；失败重试 1 次后跳过并标 Partial，返回 items=null。</summary>
-    private static async Task<(JsonElement[]? items, long total)> FetchSitePageSkippingAsync(
-        HttpClient http, string baseUrl, string accessToken, int p, long start, long end, TokenUsage usage)
+    /// <summary>全站分页（admin /api/log/）；失败重试（退避）后仍失败 → 抛异常中止本轮（不跳过，防永久漏计）。</summary>
+    private static async Task<(JsonElement[] items, long total)> FetchSitePageSkippingAsync(
+        HttpClient http, string baseUrl, string accessToken, int p, long start, long end)
     {
         var url = $"{baseUrl}/api/log/?p={p}&page_size={PageSize}&type=2&start_timestamp={start}&end_timestamp={end}";
-        JsonDocument doc;
-        try
+        using var doc = await FetchWithRetryAsync(http, url, accessToken, p);
+        if (!doc.RootElement.TryGetProperty("data", out var data)
+            || !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
+            throw new TokenFetchException($"第 {p} 页接口返回异常（缺少 data.items）");
+        long total = data.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt64() : 0;
+        var arr = items.EnumerateArray().Select(e => e.Clone()).ToArray();
+        // 空页/短页守卫：DB 抖动可能返回空或截断 items（不算错误）→ 重试，防永久漏计
+        if (arr.Length == 0 && (long)(p - 1) * PageSize < total)
+            throw new TokenFetchException($"第 {p} 页返回空数据（total={total}）");
+        if (arr.Length < PageSize && (long)p * PageSize < total)
+            throw new TokenFetchException($"第 {p} 页返回截断数据（{arr.Length} 条 < {PageSize}，total={total}）");
+        return (arr, total);
+    }
+
+    /// <summary>GET + 重试（1s/3s 退避，共 3 次），仍失败抛 TokenFetchException。</summary>
+    private static async Task<JsonDocument> FetchWithRetryAsync(HttpClient http, string url, string token, int page)
+    {
+        Exception? last = null;
+        for (int attempt = 1; attempt <= 3; attempt++)
         {
-            doc = await GetJsonAsync(http, url, accessToken);
-        }
-        catch (TokenFetchException)
-        {
-            await Task.Delay(500);
             try
             {
-                doc = await GetJsonAsync(http, url, accessToken);
+                return await GetJsonAsync(http, url, token);
             }
-            catch (TokenFetchException)
+            catch (TokenFetchException e)
             {
-                usage.Partial = true;
-                return (null, 0);
+                last = e;
+                if (attempt < 3) await Task.Delay(TimeSpan.FromSeconds(attempt == 1 ? 1 : 3));
             }
         }
-        using (doc)
-        {
-            if (!doc.RootElement.TryGetProperty("data", out var data)
-                || !data.TryGetProperty("items", out var items) || items.ValueKind != JsonValueKind.Array)
-                throw new TokenFetchException($"第 {p} 页接口返回异常（缺少 data.items）");
-            long total = data.TryGetProperty("total", out var t) && t.ValueKind == JsonValueKind.Number ? t.GetInt64() : 0;
-            return (items.EnumerateArray().Select(e => e.Clone()).ToArray(), total);
-        }
+        throw new TokenFetchException($"第 {page} 页请求失败（已重试 3 次）: {last!.Message}", last);
     }
 
     private static void AccumulateSite(JsonElement[] items, TokenUsage usage, ref long maxCreated)
