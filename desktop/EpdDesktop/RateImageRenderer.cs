@@ -148,7 +148,7 @@ public static class RateImageRenderer
     /// bw 位 = 灰度 ≥140 → 1（白）；red 位 = 红色主导（r&gt;160 且 r&gt;g 且 r&gt;b）→ 0（红），否则 1（白）。
     /// 红色像素在 bw 平面为黑位，但显示时被 red 平面掩蔽，与 web 行为一致。
     /// </summary>
-    public static (byte[] bw, byte[] red) Pack1bpp2(Bitmap bmp, int width, int height)
+    public static (byte[] bw, byte[] red) Pack1bpp2(Bitmap bmp, int width, int height, int threshold = 100)
     {
         int byteWidth = (width + 7) / 8;
         var bw = new byte[byteWidth * height];
@@ -170,9 +170,9 @@ public static class RateImageRenderer
                     int grayscale = (int)Math.Round(0.299 * r + 0.587 * g + 0.114 * b);
                     int byteIndex = y * byteWidth + (x >> 3);
                     int mask = 1 << (7 - (x & 7));
-                    if (grayscale >= 100) bw[byteIndex] |= (byte)mask; // 阈值 100：保留 AA 边缘，黑字不显淡
-                    // 红 = 红色主导 且 灰度 < 100（与黑色同门槛）：AA 浅红边缘不判红，红字与黑字同粗细
-                    bool isRed = r > 160 && r > g && r > b && grayscale < 100;
+                    if (grayscale >= threshold) bw[byteIndex] |= (byte)mask; // 阈值低→保留更多 AA 边缘，笔画更粗
+                    // 红 = 红色主导 且 灰度 < 阈值（与黑色同门槛）：AA 浅红边缘不判红，红字与黑字同粗细
+                    bool isRed = r > 160 && r > g && r > b && grayscale < threshold;
                     if (!isRed) red[byteIndex] |= (byte)mask;
                 }
             }
@@ -189,9 +189,8 @@ public static class RateImageRenderer
     /// 灰度阈值 100（web 用 140）：抗锯齿文字边缘灰度约 100-200，阈值 140 会把边缘切白、
     /// 黑字笔画变细显淡（红字因 red 判定宽松不受影响）→ 降到 100 保留笔画，与红色浓度匹配。
     /// </summary>
-    public static byte[] Pack1bpp(Bitmap bmp, int width, int height)
+    public static byte[] Pack1bpp(Bitmap bmp, int width, int height, int threshold = 100)
     {
-        const int threshold = 100;
         int byteWidth = (width + 7) / 8;
         var output = new byte[byteWidth * height];
         var data = bmp.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);

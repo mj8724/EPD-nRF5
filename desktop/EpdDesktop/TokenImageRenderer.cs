@@ -11,6 +11,9 @@ namespace EpdDesktop;
 /// </summary>
 public static class TokenImageRenderer
 {
+    /// <summary>面板打包阈值：比默认 100 更低，保留更多抗锯齿边缘 → 笔画更粗，细笔画（如"量"字横笔）不断裂。</summary>
+    private const int PanelThreshold = 85;
+
     /// <summary>渲染并打包为黑白平面（无红；标题为黑）。</summary>
     public static byte[] Render(int width, int height, TokenUsage? usage, DateTime now)
         => Pack1bpp(DrawBitmap(width, height, usage, now, useRed: false), width, height);
@@ -28,10 +31,11 @@ public static class TokenImageRenderer
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
             g.Clear(Color.White);
 
-            using var titleFont = new Font("Segoe UI", 18f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var labelFont = new Font("Segoe UI", 16f, GraphicsUnit.Pixel);
-            using var valueFont = new Font("Segoe UI", 30f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var smallFont = new Font("Segoe UI", 13f, GraphicsUnit.Pixel);
+            // 全加粗 + 低阈值：墨水屏 1bpp 下细笔画（"量"等多横字）易断裂，粗字保笔画
+            using var titleFont = new Font("Segoe UI", 20f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var labelFont = new Font("Segoe UI", 17f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var valueFont = new Font("Segoe UI", 32f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var smallFont = new Font("Segoe UI", 13f, FontStyle.Bold, GraphicsUnit.Pixel);
             using var redBrush = new SolidBrush(Color.FromArgb(0xFF, 0x00, 0x00));
             using var blackBrush = new SolidBrush(Color.Black);
 
@@ -52,9 +56,9 @@ public static class TokenImageRenderer
             var title = $"Token 用量 · {now.ToString("yyyy/M/d", CultureInfo.InvariantCulture)}";
             using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near })
             {
-                g.DrawString(title, titleFont, useRed ? redBrush : blackBrush, new RectangleF(0, 4, width, 20), sf);
+                g.DrawString(title, titleFont, useRed ? redBrush : blackBrush, new RectangleF(0, 4, width, 22), sf);
             }
-            g.FillRectangle(useRed ? redBrush : blackBrush, 4, 28, width - 8, 2);
+            g.FillRectangle(useRed ? redBrush : blackBrush, 4, 30, width - 8, 2);
 
             // 两列四格（左列 x20，右列 x215，各宽 190）
             const int col1 = 20;
@@ -78,8 +82,8 @@ public static class TokenImageRenderer
     }
 
     private static (byte[] bw, byte[] red) Pack1bpp2(Bitmap bmp, int width, int height)
-        => RateImageRenderer.Pack1bpp2(bmp, width, height);
+        => RateImageRenderer.Pack1bpp2(bmp, width, height, PanelThreshold);
 
     private static byte[] Pack1bpp(Bitmap bmp, int width, int height)
-        => RateImageRenderer.Pack1bpp(bmp, width, height);
+        => RateImageRenderer.Pack1bpp(bmp, width, height, PanelThreshold);
 }
