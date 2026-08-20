@@ -6,7 +6,7 @@ namespace EpdDesktop;
 
 /// <summary>
 /// Token 用量面板渲染（推送图片模式，对应汇率图的 Render/Render2）。
-/// 布局：红色标题 + 今日使用 / 本月使用 两大数字（居中）+ 底部最近请求/更新时间。不显示金额。
+/// 布局：红色标题 + 两列四格（今日/本月/今年/全站 token 数，无金额）+ 底部最近请求/更新时间。
 /// 三色屏用红色标题与分隔线（Render2），黑白屏全黑（Render）。
 /// </summary>
 public static class TokenImageRenderer
@@ -29,18 +29,21 @@ public static class TokenImageRenderer
             g.Clear(Color.White);
 
             using var titleFont = new Font("Segoe UI", 18f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var labelFont = new Font("Segoe UI", 18f, GraphicsUnit.Pixel);
-            using var valueFont = new Font("Segoe UI", 34f, FontStyle.Bold, GraphicsUnit.Pixel);
-            using var smallFont = new Font("Segoe UI", 14f, GraphicsUnit.Pixel);
+            using var labelFont = new Font("Segoe UI", 16f, GraphicsUnit.Pixel);
+            using var valueFont = new Font("Segoe UI", 30f, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var smallFont = new Font("Segoe UI", 13f, GraphicsUnit.Pixel);
             using var redBrush = new SolidBrush(Color.FromArgb(0xFF, 0x00, 0x00));
             using var blackBrush = new SolidBrush(Color.Black);
 
             var centered = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near };
 
-            string Day() => usage == null ? "—"
-                : $"{TokenUsageFetcher.FmtTokens(usage.DayTokens)} token";
-            string Month() => usage == null ? "—"
-                : $"{TokenUsageFetcher.FmtTokens(usage.MonthTokens)} token";
+            // 数值（无 token 后缀，列宽 190 内可放下；基准未完成显示统计中）
+            string Val(long tokens, bool baselineOk) => !baselineOk ? "统计中…"
+                : TokenUsageFetcher.FmtTokens(tokens);
+            string Day() => usage == null ? "—" : Val(usage.DayTokens, true);
+            string Month() => usage == null ? "—" : Val(usage.MonthTokens, true);
+            string Year() => usage == null ? "—" : Val(usage.YearTokens, usage.YearBaselineComplete);
+            string Site() => usage == null ? "—" : Val(usage.SiteTokens, usage.SiteBaselineComplete);
             string Recent() => usage == null || usage.LastLogAt == 0 ? "—"
                 : $"最近请求: {DateTimeOffset.FromUnixTimeSeconds(usage.LastLogAt).ToLocalTime():MM-dd HH:mm}";
             string Updated() => usage == null || usage.FetchedAt == default ? "—"
@@ -53,15 +56,23 @@ public static class TokenImageRenderer
             }
             g.FillRectangle(useRed ? redBrush : blackBrush, 4, 28, width - 8, 2);
 
-            // 今日使用（居中大数字）
-            g.DrawString("今日使用", labelFont, blackBrush, new RectangleF(0, 48, width, 24), centered);
-            g.DrawString(Day(), valueFont, blackBrush, new RectangleF(0, 76, width, 40), centered);
-            // 本月使用
-            g.DrawString("本月使用", labelFont, blackBrush, new RectangleF(0, 152, width, 24), centered);
-            g.DrawString(Month(), valueFont, blackBrush, new RectangleF(0, 180, width, 40), centered);
+            // 两列四格（左列 x20，右列 x215，各宽 190）
+            const int col1 = 20;
+            const int col2 = 215;
+            const int labelRow1 = 42;
+            const int valueRow1 = 66;
+            const int labelRow2 = 122;
+            const int valueRow2 = 146;
+            g.DrawString("今日使用", labelFont, blackBrush, col1, labelRow1);
+            g.DrawString(Day(), valueFont, blackBrush, col1, valueRow1);
+            g.DrawString("本月使用", labelFont, blackBrush, col2, labelRow1);
+            g.DrawString(Month(), valueFont, blackBrush, col2, valueRow1);
+            g.DrawString("今年使用", labelFont, blackBrush, col1, labelRow2);
+            g.DrawString(Year(), valueFont, blackBrush, col1, valueRow2);
+            g.DrawString("全站使用", labelFont, blackBrush, col2, labelRow2);
+            g.DrawString(Site(), valueFont, blackBrush, col2, valueRow2);
 
-            g.DrawString(Recent(), smallFont, blackBrush, new RectangleF(0, 246, width, 20), centered);
-            g.DrawString(Updated(), smallFont, blackBrush, new RectangleF(0, 270, width, 20), centered);
+            g.DrawString($"{Recent()}  ·  {Updated()}", smallFont, blackBrush, new RectangleF(0, 262, width, 20), centered);
         }
         return bmp;
     }

@@ -163,9 +163,10 @@ internal static class ScanProbe
             return sb.ToString();
         }
         var usage = settings.TokenUsage;
-        if (usage == null || usage.FetchedAt == default)
+        if (usage == null || usage.FetchedAt == default
+            || (DateTime.Now - usage.FetchedAt).TotalHours >= settings.TokenUpdateHours)
         {
-            sb.AppendLine("尚无 Token 数据，正在采集…");
+            sb.AppendLine("Token 数据过期，正在抓取最新…");
             usage ??= new TokenUsage();
             try
             {
