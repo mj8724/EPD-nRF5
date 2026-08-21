@@ -184,6 +184,8 @@ internal static class ScanProbe
         try
         {
             var result = await EpdPusher.PushTokenAsync(addr, usage, settings);
+            settings.DisplayMode = "token"; // 设备已显示 Token 面板：同步模式记录（防自动重推判断错位）
+            Settings.Save(settings);
             sb.AppendLine($"Token 面板推送成功: 今日 {TokenUsageFetcher.FmtTokens(usage.DayTokens)} · 本月 {TokenUsageFetcher.FmtTokens(usage.MonthTokens)}");
             sb.AppendLine($"{result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} model=0x{result.ModelId:X2} MTU={result.Mtu}");
             sb.AppendLine("已保持连接等待面板刷新完成（约 25 秒）");
@@ -215,6 +217,8 @@ internal static class ScanProbe
             }
             sb.AppendLine($"推送成功: {result.Width}x{result.Height} {(result.ThreeColor ? "三色" : "黑白")} " +
                           $"model=0x{result.ModelId:X2} MTU={result.Mtu} RLE={result.Rle}");
+            settings.DisplayMode = "rates"; // 设备已显示汇率图：同步模式记录
+            Settings.Save(settings);
             sb.AppendLine("已保持连接等待面板刷新完成（约 25 秒）");
         }
         catch (Exception e)
